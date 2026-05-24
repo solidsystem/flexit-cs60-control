@@ -202,6 +202,58 @@
             },
             "group": "test",
             "problemMatcher": []
+        },
+        {
+            "label": "nRF: BLE DFU Flash",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "${workspaceFolder}/tools/ble_dfu_flash.py",
+                "build"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "nRF: Build & BLE DFU Flash",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "nRF: Build",
+                "nRF: BLE DFU Flash"
+            ],
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "nRF: BLE DFU Confirm",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "${workspaceFolder}/tools/ble_dfu_flash.py",
+                "--confirm",
+                "build"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "nRF: BLE Console",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "${workspaceFolder}/tools/ble_console.py"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "problemMatcher": []
         }
     ]
 }

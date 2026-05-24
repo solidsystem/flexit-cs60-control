@@ -4,6 +4,8 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/ring_buffer.h>
 
+#include "ble_transport.h"
+
 static const struct gpio_dt_spec green_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 static const struct gpio_dt_spec blue_led =
@@ -112,6 +114,10 @@ int main(void)
     uart_irq_rx_enable(rs485_uart);
 
     printk("Listening on RS485 (D4=RX, D5=TX, D2=DE/RE) @ 115200 8N1...\n");
+
+    if (ble_transport_init() < 0) {
+        printk("warn: BLE transport not started\n");
+    }
 
     while (true) {
         gpio_pin_toggle_dt(&green_led);
