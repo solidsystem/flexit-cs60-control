@@ -84,7 +84,7 @@ static void blue_blink_work_handler(struct k_work *work)
 
 int main(void)
 {
-    printk("Hello, World! flexitMC3 starting on XIAO BLE + RS485 expansion board.\n");
+    printk("flexitMC3 starting.\n");
 
     if (!gpio_is_ready_dt(&green_led) ||
         !gpio_is_ready_dt(&blue_led) ||

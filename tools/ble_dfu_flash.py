@@ -44,6 +44,7 @@ except ImportError:
 DEVICE_NAME   = "flexitMC3"
 SMP_CHAR_UUID = "da2e7828-fbce-4e01-ae9e-261174997c48"
 
+OP_READ  = 0
 OP_WRITE = 2
 
 GRP_OS    = 0
@@ -59,10 +60,21 @@ CHUNK_SIZE = 128
 
 
 # ── SMP framing ────────────────────────────────────────────────────────────
+#
+# Header byte 0 packs three fields (little-endian bitfields on device):
+#   bits 0-2: op (MGMT_OP_READ=0, MGMT_OP_WRITE=2, ...)
+#   bits 3-4: version (SMP_MCUMGR_VERSION_1=0, SMP_MCUMGR_VERSION_2=1)
+#   bits 5-7: reserved (0)
+# We use V2 so the device returns the group-specific error in `err: {group, rc}`
+# instead of collapsing every IMG-group error into the V1 MGMT_ERR_EUNKNOWN.
+
+SMP_VERSION = 1
+
 
 def smp_pack(op, group, id_, seq, payload_map):
     payload = cbor2.dumps(payload_map)
-    return struct.pack(">BBHHBB", op, 0, len(payload), group, seq, id_) + payload
+    op_byte = (op & 0x07) | ((SMP_VERSION & 0x03) << 3)
+    return struct.pack(">BBHHBB", op_byte, 0, len(payload), group, seq, id_) + payload
 
 
 def smp_unpack(data):
@@ -111,6 +123,58 @@ class SMPClient:
         return cbor
 
 
+# ── Response handling ──────────────────────────────────────────────────────
+#
+# SMP has two error formats:
+#   V1 (legacy):  {"rc": N}                       — used when request header
+#                                                    sets version=0 AND device
+#                                                    has CONFIG_MCUMGR_SMP_SUPPORT_ORIGINAL_PROTOCOL=y
+#   V2 (newer):   {"err": {"group": G, "rc": N}}  — used when request version=1
+#                                                    OR when V1 support is off
+#
+# The IMG_UPLOAD success response is always {"rc": 0, "off": <next>} (V1 form).
+# We accept either format on errors to stay forward-compatible.
+
+_MGMT_ERR = {
+    0:  "EOK", 1:  "EUNKNOWN",       2:  "ENOMEM",         3:  "EINVAL",
+    4:  "ETIMEOUT", 5:  "ENOENT",    6:  "EBADSTATE",      7:  "EMSGSIZE",
+    8:  "ENOTSUP",  9:  "ECORRUPT",  10: "EBUSY",          11: "EACCESSDENIED",
+    12: "UNSUPPORTED_TOO_OLD", 13: "UNSUPPORTED_TOO_NEW",
+}
+
+_IMG_MGMT_ERR = {
+    0:  "OK",                       1:  "UNKNOWN",
+    2:  "FLASH_CONFIG_QUERY_FAIL",  3:  "NO_IMAGE",
+    4:  "NO_TLVS",                  5:  "INVALID_TLV",
+    6:  "TLV_MULTIPLE_HASHES",      7:  "TLV_INVALID_SIZE",
+    8:  "HASH_NOT_FOUND",           9:  "NO_FREE_SLOT",
+    10: "FLASH_OPEN_FAILED",        11: "FLASH_READ_FAILED",
+    12: "FLASH_WRITE_FAILED",       13: "FLASH_ERASE_FAILED",
+    14: "INVALID_SLOT",             15: "NO_FREE_MEMORY",
+    16: "FLASH_CONTEXT_ALREADY_SET",17: "FLASH_CONTEXT_NOT_SET",
+    18: "FLASH_AREA_DEVICE_NULL",   19: "INVALID_PAGE_OFFSET",
+    20: "INVALID_OFFSET",           21: "INVALID_LENGTH",
+    22: "INVALID_IMAGE_HEADER",     23: "INVALID_IMAGE_HEADER_MAGIC",
+    24: "INVALID_HASH",             25: "INVALID_FLASH_ADDRESS",
+    26: "VERSION_GET_FAILED",       27: "CURRENT_VERSION_IS_NEWER",
+    28: "IMAGE_ALREADY_PENDING",    29: "INVALID_IMAGE_VECTOR_TABLE",
+    30: "INVALID_IMAGE_TOO_LARGE",  31: "INVALID_IMAGE_DATA_OVERRUN",
+    32: "IMAGE_CONFIRMATION_DENIED",33: "IMAGE_SETTING_TEST_TO_ACTIVE_DENIED",
+}
+
+
+def _check_rc(resp):
+    """Return (rc, human_string).  rc=0 means success."""
+    if "rc" in resp and resp["rc"] != 0:
+        return resp["rc"], _MGMT_ERR.get(resp["rc"], "?")
+    if "err" in resp and isinstance(resp["err"], dict):
+        rc = resp["err"].get("rc", -1)
+        grp = resp["err"].get("group", -1)
+        name = _IMG_MGMT_ERR.get(rc, "?") if grp == 1 else _MGMT_ERR.get(rc, "?")
+        return rc, f"group={grp} {name}"
+    return 0, ""
+
+
 # ── Operations ─────────────────────────────────────────────────────────────
 
 def image_hash(image_path: str) -> str:
@@ -147,9 +211,10 @@ async def upload(smp: SMPClient, image: bytes, hash_hex: str):
         # First write may block while macOS prompts for the passkey.
         resp = await smp.request(OP_WRITE, GRP_IMAGE, ID_IMAGE_UPLOAD, payload,
                                   timeout=60.0 if offset == 0 else 30.0)
-        rc = resp.get("rc", -1)
+        rc, err = _check_rc(resp)
         if rc != 0:
-            sys.exit(f"\nerror: upload failed at offset {offset}, rc={rc}")
+            sys.exit(f"\nerror: upload failed at offset {offset}, rc={rc}"
+                     f"{' (' + err + ')' if err else ''}\n       response: {resp!r}")
 
         offset = resp.get("off", offset + len(chunk))
         pct    = min(offset * 100 // total, 100)
@@ -158,19 +223,50 @@ async def upload(smp: SMPClient, image: bytes, hash_hex: str):
     print()
 
 
+async def image_state_dump(smp: SMPClient):
+    """Read image state and print what the device sees in each slot."""
+    print("Reading image state …")
+    resp = await smp.request(OP_READ, GRP_IMAGE, ID_IMAGE_STATE, {})
+    rc, err = _check_rc(resp)
+    if rc != 0:
+        print(f"  image-state-read failed: rc={rc} {err}")
+        return
+    images = resp.get("images", [])
+    if not images:
+        print("  (device reports no images)")
+        return
+    for img in images:
+        h = img.get("hash", b"")
+        hash_str = h.hex() if isinstance(h, (bytes, bytearray)) else "?"
+        print(f"  slot={img.get('slot')} image={img.get('image', 0)} "
+              f"version={img.get('version', '?')} hash={hash_str}")
+
+
 async def image_test(smp: SMPClient, hash_hex: str):
     print("Marking image for test boot …")
     resp = await smp.request(OP_WRITE, GRP_IMAGE, ID_IMAGE_STATE,
                               {"hash": bytes.fromhex(hash_hex), "confirm": False})
-    if resp.get("rc", -1) != 0:
-        sys.exit(f"error: image-test failed, rc={resp.get('rc')}")
+    rc, err = _check_rc(resp)
+    if rc != 0:
+        # rc=33 IMAGE_SETTING_TEST_TO_ACTIVE_DENIED: img_mgmt_find_by_hash
+        # matched the active slot, meaning the uploaded image is identical to
+        # what's already running — there's nothing to "test".
+        if rc == 33:
+            sys.exit("error: the uploaded image is identical to the currently-"
+                     "running image\n       (both slots have the same hash).  "
+                     "Make any source change and\n       rebuild before re-running BLE DFU.")
+        await image_state_dump(smp)
+        sys.exit(f"error: image-test failed, rc={rc}"
+                 f"{' (' + err + ')' if err else ''}")
 
 
 async def image_confirm(smp: SMPClient):
     print("Confirming currently-running image …")
     resp = await smp.request(OP_WRITE, GRP_IMAGE, ID_IMAGE_STATE, {"confirm": True})
-    if resp.get("rc", -1) != 0:
-        sys.exit(f"error: image-confirm failed, rc={resp.get('rc')}")
+    rc, err = _check_rc(resp)
+    if rc != 0:
+        sys.exit(f"error: image-confirm failed, rc={rc}"
+                 f"{' (' + err + ')' if err else ''}")
     print("Done. Image confirmed.")
 
 
