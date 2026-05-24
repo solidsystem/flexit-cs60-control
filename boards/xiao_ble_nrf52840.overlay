@@ -1,0 +1,42 @@
+/ {
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+	};
+};
+
+/delete-node/ &code_partition;
+/delete-node/ &reserved_partition_0;
+/delete-node/ &boot_partition;
+/delete-node/ &storage_partition;
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			reg = <0x0 0x0000c000>;
+			label = "mcuboot";
+		};
+
+		slot0_partition: partition@c000 {
+			reg = <0xc000 0x72000>;
+			label = "slot0_partition";
+		};
+
+		slot1_partition: partition@7e000 {
+			reg = <0x7e000 0x72000>;
+			label = "slot1_partition";
+		};
+
+		scratch_partition: partition@f0000 {
+			reg = <0xf0000 0x10000>;
+			label = "scratch_partition";
+		};
+	};
+};
+
+&nvic {
+    status = "disabled";
+};

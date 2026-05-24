@@ -1,0 +1,7 @@
+{
+    "nrf-connect.toolchain.path": "/opt/nordic/ncs/toolchains/0c0f19d91c",
+    "nrf-connect.sdk.path": "/opt/nordic/ncs/v3.3.0",
+    "nrf-connect.applications": [
+        "${workspaceFolder}"
+    ]
+}
