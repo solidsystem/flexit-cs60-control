@@ -13,9 +13,6 @@
 #include <zephyr/logging/log_backend.h>
 #include <zephyr/logging/log_output.h>
 
-#include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
-#include <zephyr/mgmt/mcumgr/grp/img_mgmt/img_mgmt_callbacks.h>
-
 #include <bluetooth/services/nus.h>
 
 #define FIXED_PASSKEY 444999u
@@ -32,27 +29,13 @@ static const struct bt_data sd[] = {
     BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_VAL),
 };
 
-static void advertising_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(advertising_work, advertising_work_handler);
-
-static void advertising_work_handler(struct k_work *work)
+static void advertising_start(void)
 {
-    ARG_UNUSED(work);
     int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
                               sd, ARRAY_SIZE(sd));
-    if (err == -ENOMEM || err == -ECONNREFUSED) {
-        /* BT host hasn't fully released the connection slot yet — retry. */
-        (void)k_work_reschedule(&advertising_work, K_MSEC(100));
-        return;
-    }
     if (err && err != -EALREADY) {
         printk("bt_le_adv_start failed: %d\n", err);
     }
-}
-
-static void advertising_start(void)
-{
-    (void)k_work_reschedule(&advertising_work, K_NO_WAIT);
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -220,48 +203,9 @@ static const struct log_backend_api nus_backend_api = {
 
 LOG_BACKEND_DEFINE(nus_log_backend, nus_backend_api, true);
 
-/* ---- DFU status hook: pause BLE advertising during image upload ----------
- *
- * MPSL radio timeslots run concurrently with flash writes and can corrupt
- * the image being written to slot1, causing image-test to fail with
- * MGMT_ERR_EUNKNOWN (hash mismatch).  Stopping advertising eliminates the
- * radio load for USB DFU; for BLE DFU the existing connection stays alive.
- */
-
-static enum mgmt_cb_return dfu_status_cb(uint32_t event,
-                                          enum mgmt_cb_return prev_status,
-                                          int32_t *rc, uint16_t *group,
-                                          bool *abort_request,
-                                          void *data, size_t data_size)
-{
-    ARG_UNUSED(prev_status);
-    ARG_UNUSED(rc);
-    ARG_UNUSED(group);
-    ARG_UNUSED(abort_request);
-    ARG_UNUSED(data);
-    ARG_UNUSED(data_size);
-
-    if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STARTED) {
-        printk("DFU started — pausing BLE advertising\n");
-        bt_le_adv_stop();
-    } else if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED) {
-        printk("DFU stopped — resuming BLE advertising\n");
-        advertising_start();
-    }
-
-    return MGMT_CB_OK;
-}
-
-static struct mgmt_callback dfu_mgmt_cb = {
-    .callback = dfu_status_cb,
-    .event_id = MGMT_EVT_OP_IMG_MGMT_DFU_STARTED | MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED,
-};
-
 int ble_transport_init(void)
 {
     int err;
-
-    mgmt_callback_register(&dfu_mgmt_cb);
 
     err = bt_conn_auth_cb_register(&auth_cb);
     if (err) {
