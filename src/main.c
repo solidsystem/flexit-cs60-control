@@ -22,12 +22,18 @@ RING_BUF_DECLARE(rx_rb, RX_RING_SIZE);
 #define BLUE_BLINK_MS    5000
 #define BLUE_BLINK_TICK  K_MSEC(100)
 
+/* Modbus RTU frame separator: >= 3.5 char-times of bus idle. At 115200 that's
+ * ~300us, so 3ms is comfortably longer than any legal inter-byte gap while
+ * still short enough not to merge adjacent frames.
+ */
+#define RX_FRAME_GAP     K_MSEC(3)
+
 static int64_t blue_blink_until_ms;
 
-static void rx_work_handler(struct k_work *work);
+static void flush_work_handler(struct k_work *work);
 static void blue_blink_work_handler(struct k_work *work);
 
-static K_WORK_DEFINE(rx_work, rx_work_handler);
+static K_WORK_DELAYABLE_DEFINE(flush_work, flush_work_handler);
 static K_WORK_DELAYABLE_DEFINE(blue_blink_work, blue_blink_work_handler);
 
 static void uart_isr(const struct device *dev, void *user_data)
@@ -46,28 +52,37 @@ static void uart_isr(const struct device *dev, void *user_data)
         }
 
         ring_buf_put(&rx_rb, buf, n);
-        k_work_submit(&rx_work);
+        /* Push the flush deadline out on every byte burst so we only print
+         * after the bus has been quiet for one inter-frame gap.
+         */
+        k_work_reschedule(&flush_work, RX_FRAME_GAP);
     }
 }
 
-static void rx_work_handler(struct k_work *work)
+static void flush_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
 
-    uint8_t buf[64];
-    uint32_t n;
-
-    while ((n = ring_buf_get(&rx_rb, buf, sizeof(buf))) > 0) {
-        char line[16 + sizeof(buf) * 3];
-        int p = snprintk(line, sizeof(line), "RS485 RX (%u):", n);
-        for (uint32_t i = 0; i < n && p < (int)sizeof(line) - 4; i++) {
-            p += snprintk(line + p, sizeof(line) - p, " %02X", buf[i]);
-        }
-        printk("%s\n", line);
-
-        blue_blink_until_ms = k_uptime_get() + BLUE_BLINK_MS;
-        k_work_schedule(&blue_blink_work, K_NO_WAIT);
+    uint8_t buf[256];
+    uint32_t n = ring_buf_get(&rx_rb, buf, sizeof(buf));
+    if (n == 0) {
+        return;
     }
+
+    char line[16 + sizeof(buf) * 3];
+    int p = snprintk(line, sizeof(line), "RS485 RX (%u):", n);
+    for (uint32_t i = 0; i < n && p < (int)sizeof(line) - 4; i++) {
+        p += snprintk(line + p, sizeof(line) - p, " %02X", buf[i]);
+    }
+    printk("%s\n", line);
+
+    /* If a frame larger than our read buffer arrived, drain the rest now. */
+    if (!ring_buf_is_empty(&rx_rb)) {
+        k_work_reschedule(&flush_work, K_NO_WAIT);
+    }
+
+    blue_blink_until_ms = k_uptime_get() + BLUE_BLINK_MS;
+    k_work_schedule(&blue_blink_work, K_NO_WAIT);
 }
 
 static void blue_blink_work_handler(struct k_work *work)
