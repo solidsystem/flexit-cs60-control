@@ -113,7 +113,7 @@ int main(void)
     uart_irq_callback_set(rs485_uart, uart_isr);
     uart_irq_rx_enable(rs485_uart);
 
-    printk("Listening on RS485 (D4=RX, D5=TX, D2=DE/RE) @ 115200 8N1...\n");
+    printk("Listening on RS485 (D4=TX, D5=RX, D2=DE/RE) @ 115200 8N1...\n");
 
     if (ble_transport_init() < 0) {
         printk("warn: BLE transport not started\n");
