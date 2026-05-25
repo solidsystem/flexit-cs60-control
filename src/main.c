@@ -58,11 +58,12 @@ static void rx_work_handler(struct k_work *work)
     uint32_t n;
 
     while ((n = ring_buf_get(&rx_rb, buf, sizeof(buf))) > 0) {
-        printk("RS485 RX (%u):", n);
-        for (uint32_t i = 0; i < n; i++) {
-            printk(" %02X", buf[i]);
+        char line[16 + sizeof(buf) * 3];
+        int p = snprintk(line, sizeof(line), "RS485 RX (%u):", n);
+        for (uint32_t i = 0; i < n && p < (int)sizeof(line) - 4; i++) {
+            p += snprintk(line + p, sizeof(line) - p, " %02X", buf[i]);
         }
-        printk("\n");
+        printk("%s\n", line);
 
         blue_blink_until_ms = k_uptime_get() + BLUE_BLINK_MS;
         k_work_schedule(&blue_blink_work, K_NO_WAIT);
