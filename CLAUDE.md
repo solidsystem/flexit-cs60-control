@@ -62,6 +62,7 @@ Single sysbuild dir `build/` serves both flash paths:
 
 - **SWD via Nordic DK J-Link OB** (serial `1050279550`) — used once to install MCUboot + the first signed app, or whenever the bootloader needs reflashing. `west flash --build-dir build` flashes both images per `domains.yaml flash_order: [mcuboot, flexitMC3]`. For faster post-bootloader iteration over SWD use `--domain flexitMC3` to flash only the signed app.
 - **USB DFU over the XIAO's own USB-C** — `tools/usb_dfu_flash.sh build` uploads `build/flexitMC3/zephyr/zephyr.signed.bin` via `nrfutil mcu-manager` (Nordic's SMP client, ships in the NCS toolchain — no extra install). Marks for test boot, resets; MCUboot swaps on the reset. After successful boot, run `nrfutil mcu-manager serial --serial-port <port> image-confirm` to make sticky. **Note:** uses the `mcu-manager` plugin (SMP protocol). Do **not** confuse with the `nrf5sdk-tools dfu` plugin, which speaks the legacy nRF5 SDK DFU protocol and is incompatible with MCUboot.
+- **BLE DFU + console** — `tools/ble_dfu_flash.py` (SMP/MCUmgr over BLE) and `tools/ble_console.py` (NUS notifications). When Claude needs to drive a build/flash/monitor cycle itself, see [.claude/skills/flash-monitor/SKILL.md](.claude/skills/flash-monitor/SKILL.md) for the exact commands and the background-capture pattern.
 
 The nRF Connect VS Code extension's Flash button is hard-wired to `west flash` (SWD runners) — it does **not** do USB DFU. For USB DFU use the VS Code task `nRF: Build & USB DFU Flash` (set as default test task → `Cmd+Shift+T`).
 
