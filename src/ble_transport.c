@@ -1,6 +1,8 @@
 #include "ble_transport.h"
+#include "rs485_store.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
@@ -10,8 +12,6 @@
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/uuid.h>
 
-#include <zephyr/logging/log_backend.h>
-#include <zephyr/logging/log_output.h>
 #include <zephyr/settings/settings.h>
 
 #include <bluetooth/services/nus.h>
@@ -19,6 +19,22 @@
 #define FIXED_PASSKEY 444999u
 
 static struct bt_conn *current_conn;
+
+/* Dump-on-subscribe machinery.
+ *
+ * When the central enables notifications on the NUS TX characteristic, the
+ * NUS service's `send_enabled` callback fires. We hand the connection off to
+ * a dedicated dump thread which: (1) snapshots the RS485 ring buffer,
+ * (2) streams every stored frame back as space-separated hex over NUS
+ * notifications, (3) disconnects. Running this on its own thread keeps the
+ * BT RX thread responsive and lets the RS485 flush_work in main.c continue
+ * appending new frames while the dump is in flight.
+ */
+static K_THREAD_STACK_DEFINE(dump_thread_stack, 2048);
+static struct k_thread dump_thread_data;
+static struct k_sem dump_sem;
+static struct bt_conn *dump_conn;
+static atomic_t dump_in_progress = ATOMIC_INIT(0);
 
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -172,66 +188,152 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
     printk("\n");
 }
 
-static struct bt_nus_cb nus_callbacks = {
-    .received = nus_received,
-};
-
-/* ---- Log backend: mirrors log/printk traffic over NUS notifications. ---- */
-
-#define NUS_LOG_BUF_SIZE 128
-static uint8_t nus_log_buf[NUS_LOG_BUF_SIZE];
-
-static int nus_log_out(uint8_t *data, size_t length, void *ctx)
+/* Fired by the NUS service when the central subscribes to (or unsubscribes
+ * from) notifications on the NUS TX characteristic. We use the ENABLED edge
+ * as the trigger to dump the stored RS485 ring buffer and then close the
+ * link.
+ */
+static void nus_send_enabled(enum bt_nus_send_status status)
 {
-    ARG_UNUSED(ctx);
-    if (current_conn) {
-        /* Drop the chunk on failure (e.g. notifications not yet enabled or
-         * BT TX queue full); the USB CDC backend still has the full record.
-         */
-        (void)bt_nus_send(current_conn, data, length);
+    if (status != BT_NUS_SEND_STATUS_ENABLED) {
+        return;
     }
-    return length;
-}
-
-LOG_OUTPUT_DEFINE(nus_log_output, nus_log_out, nus_log_buf, sizeof(nus_log_buf));
-
-static uint32_t nus_log_format_flags;
-
-static void nus_backend_process(const struct log_backend *const backend,
-                                union log_msg_generic *msg)
-{
-    ARG_UNUSED(backend);
     if (!current_conn) {
         return;
     }
-    log_output_msg_process(&nus_log_output, &msg->log, nus_log_format_flags);
+    /* atomic_cas returns true iff dump_in_progress transitioned 0 -> 1.
+     * Without this guard a stray "subscribe" event during an in-flight dump
+     * would leak the previous bt_conn_ref.
+     */
+    if (!atomic_cas(&dump_in_progress, 0, 1)) {
+        return;
+    }
+    dump_conn = bt_conn_ref(current_conn);
+    k_sem_give(&dump_sem);
 }
 
-static void nus_backend_panic(const struct log_backend *const backend)
+static struct bt_nus_cb nus_callbacks = {
+    .received = nus_received,
+    .send_enabled = nus_send_enabled,
+};
+
+/* ---- Dump thread: drains the RS485 ring out over NUS, then disconnects. ----
+ *
+ * Notification chunk size is capped well below the negotiated MTU so each
+ * line of formatted hex output fits in one notification; bt_nus_send returns
+ * -ENOMEM when the GATT TX pool is momentarily full, in which case we sleep
+ * briefly and retry.
+ */
+
+#define NUS_CHUNK_BYTES 200
+
+static int nus_send_blocking(struct bt_conn *conn,
+                             const uint8_t *data, uint16_t len)
 {
-    ARG_UNUSED(backend);
-    log_output_flush(&nus_log_output);
+    for (;;) {
+        int err = bt_nus_send(conn, data, len);
+        if (err == 0) {
+            return 0;
+        }
+        if (err == -ENOMEM) {
+            k_sleep(K_MSEC(20));
+            continue;
+        }
+        /* -ENOTCONN, -EINVAL, ... – not worth retrying. */
+        return err;
+    }
 }
 
-static int nus_backend_format_set(const struct log_backend *const backend,
-                                  uint32_t log_type)
+static int nus_send_chunked(struct bt_conn *conn,
+                            const char *data, size_t len)
 {
-    ARG_UNUSED(backend);
-    nus_log_format_flags = log_type;
+    while (len > 0) {
+        size_t n = (len > NUS_CHUNK_BYTES) ? NUS_CHUNK_BYTES : len;
+        int err = nus_send_blocking(conn, (const uint8_t *)data, (uint16_t)n);
+        if (err) {
+            return err;
+        }
+        data += n;
+        len -= n;
+    }
     return 0;
 }
 
-static const struct log_backend_api nus_backend_api = {
-    .process = nus_backend_process,
-    .panic = nus_backend_panic,
-    .format_set = nus_backend_format_set,
-};
+static void do_dump(struct bt_conn *conn)
+{
+    static uint8_t snap[RS485_STORE_SIZE];
+    size_t n = rs485_store_snapshot(snap, sizeof(snap));
 
-LOG_BACKEND_DEFINE(nus_log_backend, nus_backend_api, true);
+    if (n == 0) {
+        static const char empty[] = "(no RS485 frames stored)\n";
+        (void)nus_send_chunked(conn, empty, sizeof(empty) - 1);
+        return;
+    }
+
+    /* Worst-case formatted line for a single 64 KiB-1 frame would be huge,
+     * but in practice RS485 frames here top out around 256 B. The buffer
+     * below comfortably fits any frame we'd ever store.
+     */
+    static char line[16 + 256 * 3 + 4];
+
+    size_t i = 0;
+    while (i + 2 <= n) {
+        uint16_t flen = (uint16_t)snap[i] | ((uint16_t)snap[i + 1] << 8);
+        i += 2;
+        if (i + flen > n) {
+            break;
+        }
+
+        int p = snprintk(line, sizeof(line), "RS485 RX (%u):", flen);
+        for (uint16_t j = 0; j < flen && p < (int)sizeof(line) - 4; j++) {
+            p += snprintk(line + p, sizeof(line) - p, " %02X", snap[i + j]);
+        }
+        if (p < (int)sizeof(line) - 1) {
+            line[p++] = '\n';
+        }
+        if (nus_send_chunked(conn, line, (size_t)p) != 0) {
+            return;
+        }
+
+        i += flen;
+    }
+}
+
+static void dump_thread_entry(void *a, void *b, void *c)
+{
+    ARG_UNUSED(a);
+    ARG_UNUSED(b);
+    ARG_UNUSED(c);
+
+    for (;;) {
+        k_sem_take(&dump_sem, K_FOREVER);
+
+        struct bt_conn *conn = dump_conn;
+        if (conn) {
+            do_dump(conn);
+            /* Give the controller a brief moment to push the last
+             * notifications onto the air before we drop the link.
+             */
+            k_sleep(K_MSEC(100));
+            (void)bt_conn_disconnect(conn,
+                                     BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+            bt_conn_unref(conn);
+            dump_conn = NULL;
+        }
+        atomic_set(&dump_in_progress, 0);
+    }
+}
 
 int ble_transport_init(void)
 {
     int err;
+
+    k_sem_init(&dump_sem, 0, 1);
+    k_thread_create(&dump_thread_data, dump_thread_stack,
+                    K_THREAD_STACK_SIZEOF(dump_thread_stack),
+                    dump_thread_entry, NULL, NULL, NULL,
+                    K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+    k_thread_name_set(&dump_thread_data, "rs485_dump");
 
     err = bt_conn_auth_cb_register(&auth_cb);
     if (err) {

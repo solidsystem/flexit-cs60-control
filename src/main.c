@@ -5,6 +5,7 @@
 #include <zephyr/sys/ring_buffer.h>
 
 #include "ble_transport.h"
+#include "rs485_store.h"
 
 static const struct gpio_dt_spec green_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
@@ -69,12 +70,7 @@ static void flush_work_handler(struct k_work *work)
         return;
     }
 
-    char line[16 + sizeof(buf) * 3];
-    int p = snprintk(line, sizeof(line), "RS485 RX (%u):", n);
-    for (uint32_t i = 0; i < n && p < (int)sizeof(line) - 4; i++) {
-        p += snprintk(line + p, sizeof(line) - p, " %02X", buf[i]);
-    }
-    printk("%s\n", line);
+    rs485_store_append(buf, n);
 
     /* If a frame larger than our read buffer arrived, drain the rest now. */
     if (!ring_buf_is_empty(&rx_rb)) {
