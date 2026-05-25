@@ -44,8 +44,13 @@
 		};
 
 		scratch_partition: partition@f0000 {
-			reg = <0xf0000 0x10000>;
+			reg = <0xf0000 0xe000>;
 			label = "scratch_partition";
+		};
+
+		storage_partition: partition@fe000 {
+			reg = <0xfe000 0x2000>;
+			label = "storage";
 		};
 	};
 };

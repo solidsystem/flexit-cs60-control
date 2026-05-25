@@ -12,6 +12,7 @@
 
 #include <zephyr/logging/log_backend.h>
 #include <zephyr/logging/log_output.h>
+#include <zephyr/settings/settings.h>
 
 #include <bluetooth/services/nus.h>
 
@@ -248,6 +249,17 @@ int ble_transport_init(void)
     if (err) {
         printk("bt_enable failed: %d\n", err);
         return err;
+    }
+
+    /* Load persisted BLE bond data from NVS (storage_partition). Without this
+     * the LTK established during the previous pairing is forgotten on every
+     * reboot, which forces macOS to re-pair every time and breaks reconnects
+     * where macOS tries to use its cached LTK.
+     */
+    err = settings_load();
+    if (err) {
+        printk("settings_load failed: %d (continuing without persisted bonds)\n",
+               err);
     }
 
     err = bt_nus_init(&nus_callbacks);
