@@ -137,6 +137,7 @@ int main(void)
 
     while (true) {
         gpio_pin_toggle_dt(&green_led);
+        ble_transport_ensure_advertising();
         k_msleep(500);
     }
 

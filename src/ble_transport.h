@@ -9,4 +9,11 @@
  */
 int ble_transport_init(void);
 
+/* Idempotent safety-net call: starts advertising if no BLE connection is
+ * currently up. Returning -EALREADY is treated as success and silent. Call
+ * this periodically from the main loop so that any path where the post-
+ * disconnect advertising restart is missed gets corrected quickly.
+ */
+void ble_transport_ensure_advertising(void);
+
 #endif

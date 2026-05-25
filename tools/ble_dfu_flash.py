@@ -44,6 +44,28 @@ except ImportError:
 DEVICE_NAME   = "flexitMC3"
 SMP_CHAR_UUID = "da2e7828-fbce-4e01-ae9e-261174997c48"
 
+# See ble_console.py for the rationale — macOS name-scan cache work-around.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ADDR_CACHE    = os.path.join(_PROJECT_ROOT, "run", "device_address.txt")
+
+
+def _load_cached_address() -> str | None:
+    try:
+        with open(ADDR_CACHE) as f:
+            addr = f.read().strip()
+            return addr or None
+    except OSError:
+        return None
+
+
+def _save_cached_address(addr: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(ADDR_CACHE), exist_ok=True)
+        with open(ADDR_CACHE, "w") as f:
+            f.write(addr)
+    except OSError:
+        pass
+
 OP_READ  = 0
 OP_WRITE = 2
 
@@ -293,11 +315,39 @@ async def run(args):
         print(f"Image : {image_path}  ({len(image)} B)")
         print(f"Hash  : {hash_hex}")
 
-    print(f"Scanning for '{args.name}' (up to {args.scan_timeout:.0f} s) …")
-    device = await BleakScanner.find_device_by_filter(
-        lambda d, _: d.name == args.name, timeout=args.scan_timeout)
+    # 1. Try the cached address from a previous successful run first — this
+    #    avoids macOS's name-scan cache which can stay stale for many seconds
+    #    after a disconnect.
+    device = None
+    cached = _load_cached_address()
+    if cached:
+        print(f"Trying cached address {cached} (up to 5 s) …")
+        device = await BleakScanner.find_device_by_address(cached, timeout=5)
+        if not device:
+            print("  cached address not seen — falling back to name scan.")
+
+    # 2. Name scan with retries.
     if not device:
-        sys.exit(f"error: '{args.name}' not found.  Is the device advertising?")
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            if attempt == 1:
+                print(f"Scanning for '{args.name}' (up to {args.scan_timeout:.0f} s) …")
+            else:
+                await asyncio.sleep(2)
+                print(f"  not found yet — retrying ({attempt}/{attempts}) …")
+            device = await BleakScanner.find_device_by_filter(
+                lambda d, _: d.name == args.name, timeout=args.scan_timeout)
+            if device:
+                break
+        if not device:
+            sys.exit(
+                f"error: '{args.name}' not found after {attempts} scans.\n"
+                f"       If the device just disconnected from another BLE client,\n"
+                f"       macOS may still be caching stale state — wait ~10 seconds\n"
+                f"       and retry, or clear the entry under System Settings →\n"
+                f"       Bluetooth → (i) next to '{args.name}' → Forget.")
+
+    _save_cached_address(device.address)
 
     print(f"Found  {device.name}  [{device.address}] — connecting …")
     async with BleakClient(device) as client:

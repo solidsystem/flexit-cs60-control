@@ -1,7 +1,6 @@
 #include "ble_transport.h"
 
 #include <zephyr/kernel.h>
-#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
@@ -19,7 +18,6 @@
 #define FIXED_PASSKEY 444999u
 
 static struct bt_conn *current_conn;
-static atomic_t active_conns;
 
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -33,19 +31,37 @@ static const struct bt_data sd[] = {
 
 static void advertising_start(void)
 {
-    /* No free connection slot: skip silently — adv will be retried when a
-     * slot frees in disconnected().
-     */
-    if (atomic_get(&active_conns) >= CONFIG_BT_MAX_CONN) {
-        return;
-    }
-
     int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
                               sd, ARRAY_SIZE(sd));
-    if (err && err != -EALREADY) {
+    if (err == 0) {
+        printk("BLE advertising (re)started\n");
+    } else if (err != -EALREADY) {
         printk("bt_le_adv_start failed: %d\n", err);
     }
 }
+
+void ble_transport_ensure_advertising(void)
+{
+    if (current_conn == NULL) {
+        advertising_start();
+    }
+}
+
+/* Run advertising restart from the system workqueue rather than directly
+ * from disconnected(). When called inline from the BT RX thread before the
+ * host has finished tearing down the just-closed connection, bt_le_adv_start
+ * returns -ENOMEM. Submitting to a worker decouples timing so the start
+ * succeeds on the first try.
+ */
+static void adv_restart_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (current_conn == NULL) {
+        advertising_start();
+    }
+}
+
+static K_WORK_DEFINE(adv_restart_work, adv_restart_work_handler);
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -57,11 +73,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
         return;
     }
 
-    atomic_inc(&active_conns);
-
-    if (current_conn) {
-        bt_conn_unref(current_conn);
-    }
     current_conn = bt_conn_ref(conn);
     printk("BLE connected: %s\n", addr);
 
@@ -73,11 +84,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
         printk("bt_conn_set_security failed: %d\n", sec);
         bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
     }
-
-    /* Keep advertising so a second central (e.g. DFU client) can also
-     * connect while the console client stays up.
-     */
-    advertising_start();
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -91,9 +97,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         current_conn = NULL;
     }
 
-    atomic_dec(&active_conns);
-
-    advertising_start();
+    k_work_submit(&adv_restart_work);
 }
 
 static void security_changed(struct bt_conn *conn, bt_security_t level,

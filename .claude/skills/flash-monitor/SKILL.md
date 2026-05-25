@@ -11,8 +11,11 @@ macOS (CoreBluetooth, no HCI dongle):
 - **SMP / MCUmgr** — receives signed-image uploads and reset commands (DFU).
 - **Nordic UART Service (NUS)** — streams `printk` / log output as notifications.
 
-[prj.conf](../../../prj.conf) sets `CONFIG_BT_MAX_CONN=2`, so the console
-and the DFU client can be connected simultaneously.
+Only one BLE connection is accepted at a time (`CONFIG_BT_MAX_CONN=1`). The
+console client must be stopped before starting a flash/confirm. All three
+Python tools use bleak's `async with BleakClient(...)` context manager, so a
+normal exit / Ctrl-C / SIGTERM triggers a clean disconnect; the device then
+resumes advertising and the next client can connect without a manual reset.
 
 ## Build
 
@@ -84,9 +87,8 @@ Read what has been captured so far:
 cat run/console.log
 ```
 
-Stop the capture (do this before re-flashing — `ble_console.py` holds one of
-the two BLE connection slots, and the DFU client needs the other slot for
-itself):
+Stop the capture (mandatory before any flash/confirm — there's only one BLE
+connection slot and `ble_console.py` holds it while running):
 
 ```bash
 [ -f run/console.pid ] && kill "$(cat run/console.pid)" 2>/dev/null
@@ -149,8 +151,7 @@ Console lines that matter for current debugging:
   [src/main.c](../../../src/main.c) `flush_work_handler`).
 - `BLE connected: …` / `BLE disconnected: …` / `BLE security raised …` —
   pairing and link status.
-- `bt_le_adv_start failed: -N` — unexpected advertising error; usually means
-  both connection slots are in use.
+- `bt_le_adv_start failed: -N` — unexpected advertising error.
 
 When summarising captured output back to the user, prefer pasting the
 relevant lines verbatim — line counts and exact byte sequences matter when
