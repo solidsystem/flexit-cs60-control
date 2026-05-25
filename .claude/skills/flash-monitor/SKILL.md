@@ -1,6 +1,6 @@
 ---
 name: flash-monitor
-description: Build the flexitMC3 firmware, flash it over BLE DFU, and stream the BLE NUS console — all without any USB cable to the XIAO. Use whenever a code change needs to be tried on real hardware, or whenever you need to read runtime printk/log output (RS485 listener traces, BLE pairing events, etc.) to diagnose behaviour.
+description: Build the flexitMC3 firmware, flash it over BLE DFU, and read the BLE NUS console dump — all without any USB cable to the XIAO. Use whenever a code change needs to be tried on real hardware, or whenever you need to read the stored RS485 traffic to diagnose behaviour.
 ---
 
 # Build, flash, and monitor flexitMC3 over Bluetooth
@@ -9,13 +9,40 @@ The board advertises as `flexitMC3` and exposes two BLE services we drive from
 macOS (CoreBluetooth, no HCI dongle):
 
 - **SMP / MCUmgr** — receives signed-image uploads and reset commands (DFU).
-- **Nordic UART Service (NUS)** — streams `printk` / log output as notifications.
+- **Nordic UART Service (NUS)** — one-shot RS485 ring-buffer dump on connect.
 
-Only one BLE connection is accepted at a time (`CONFIG_BT_MAX_CONN=1`). The
-console client must be stopped before starting a flash/confirm. All three
-Python tools use bleak's `async with BleakClient(...)` context manager, so a
-normal exit / Ctrl-C / SIGTERM triggers a clean disconnect; the device then
-resumes advertising and the next client can connect without a manual reset.
+Only one BLE connection is accepted at a time (`CONFIG_BT_MAX_CONN=1`).
+
+## NUS console: dump-on-connect behaviour
+
+The device does **not** stream logs continuously. Instead:
+
+1. `ble_console.py` connects and subscribes to NUS TX notifications.
+2. The device's `nus_send_enabled` callback fires, wakes the `rs485_dump`
+   thread, which snapshots the RS485 ring buffer (up to 2 KB) and sends it
+   over NUS as formatted hex lines.
+3. After the dump the device **disconnects itself** (HCI reason 0x16 —
+   Remote User Terminated Connection). `ble_console.py` prints `Disconnected.`
+   and exits normally.
+
+Output format:
+
+```
+RS485 RX (55): 01 03 00 2E 00 0A ...
+RS485 RX (57): 01 03 14 00 01 ...
+Disconnected.
+```
+
+If the ring buffer is empty:
+
+```
+(no RS485 frames stored)
+Disconnected.
+```
+
+Because the device disconnects by itself, there is **no need to kill
+`ble_console.py` before starting a flash or confirm** — the BLE slot is
+already free.
 
 ## Build
 
@@ -62,54 +89,30 @@ If the upload errors with `IMAGE_SETTING_TEST_TO_ACTIVE_DENIED` (rc=33), the
 built image is bit-identical to what's already running — make any source
 change and rebuild before retrying.
 
-## Monitor the NUS console
+## Read the NUS dump
 
-### Foreground (interactive — only when the user is driving)
+### Foreground (interactive or from Bash tool)
 
 ```bash
 python3 tools/ble_console.py
 ```
 
-### Background (the pattern I use to capture output between steps)
+The script connects, receives the dump, prints it, and exits when the device
+disconnects. No kill step needed afterward.
 
-Always launch with `python3 -u` so prints flush immediately, redirect to a
-known logfile under `run/`, and stash the PID so we can stop it cleanly:
+### Capturing output to a file
 
 ```bash
 mkdir -p run
-python3 -u tools/ble_console.py > run/console.log 2>&1 &
-echo $! > run/console.pid
-```
-
-Read what has been captured so far:
-
-```bash
+python3 tools/ble_console.py > run/console.log 2>&1
 cat run/console.log
 ```
 
-Stop the capture (mandatory before any flash/confirm — there's only one BLE
-connection slot and `ble_console.py` holds it while running):
-
-```bash
-[ -f run/console.pid ] && kill "$(cat run/console.pid)" 2>/dev/null
-rm -f run/console.pid
-```
-
-When invoking from the Bash tool, prefer launching the background capture
-with `run_in_background: true` instead of `&` — that way the Claude harness
-manages the lifecycle and I'll be notified if the script crashes. Still
-redirect output to `run/console.log` so I can read it via `cat`.
-
-The `run/` directory is gitignored (entry added alongside `build*/`). It
-holds anything ephemeral I generate while driving the device — logs, PID
-files, captured frames, etc. Safe to wipe between sessions.
+Because the dump is self-terminating, no background PID management is needed.
 
 ## Full dev cycle (one block, copy-paste safe)
 
 ```bash
-# 0. Stop any previous console capture so we don't lock the BLE slot.
-[ -f run/console.pid ] && kill "$(cat run/console.pid)" 2>/dev/null
-rm -f run/console.pid
 mkdir -p run
 
 # 1. Build.
@@ -121,38 +124,36 @@ python3 tools/ble_dfu_flash.py
 # 3. Give the device a few seconds to reboot + start advertising again.
 sleep 8
 
-# 4. Start console capture in the background.
-python3 -u tools/ble_console.py > run/console.log 2>&1 &
-echo $! > run/console.pid
-
-# 5. Wait for output, then inspect.
-sleep 5
+# 4. Read the RS485 dump (device auto-disconnects when done).
+python3 tools/ble_console.py > run/console.log 2>&1
 cat run/console.log
 ```
 
-## Passkey caveat (read this if a step hangs)
+## Passkey and bonding
 
-The device has `CONFIG_BT_BONDABLE=n` — pairing state isn't persisted across
-reboots. macOS may pop up a system dialog asking for the 6-digit passkey
-`444999` (the value of `FIXED_PASSKEY` in
-[src/ble_transport.c](../../../src/ble_transport.c)). I cannot respond to
-that dialog programmatically — if either Python script stalls right after
-printing `Connected.`, ask the user to enter `444999` in the macOS prompt.
+The device uses `CONFIG_BT_BONDABLE=y` with NVS-backed settings persistence.
+After the **first** pairing (fixed passkey `444999` from `FIXED_PASSKEY` in
+[src/ble_transport.c](../../../src/ble_transport.c)), both macOS and the device
+store the LTK. Subsequent connections re-use the cached LTK without prompting.
 
-If pairing fails repeatedly, the user can clear macOS's stale entry under
-**System Settings → Bluetooth → (i) next to `flexitMC3` → Forget**, then
-retry.
+The bond survives DFU flashes because `storage_partition` lives at `0xfe000`
+outside MCUboot's swap slots.
 
-## Reading and reporting console output
+If a passkey prompt appears (first pairing after bond wipe), enter `444999`.
+If pairing fails repeatedly, clear macOS's stale entry under
+**System Settings → Bluetooth → (i) next to `flexitMC3` → Forget**, then retry.
 
-Console lines that matter for current debugging:
+## Reading and reporting dump output
 
-- `RS485 RX (n): XX XX ...` — frame-grouped UART listener (see
-  [src/main.c](../../../src/main.c) `flush_work_handler`).
+- `RS485 RX (n): XX XX ...` — one line per stored frame; `n` is the byte count.
+- `(no RS485 frames stored)` — ring buffer was empty at connect time.
 - `BLE connected: …` / `BLE disconnected: …` / `BLE security raised …` —
-  pairing and link status.
-- `bt_le_adv_start failed: -N` — unexpected advertising error.
+  visible in USB serial log, not in the NUS dump.
 
-When summarising captured output back to the user, prefer pasting the
-relevant lines verbatim — line counts and exact byte sequences matter when
-diagnosing RS485 framing issues.
+When summarising captured output back to the user, paste the relevant lines
+verbatim — line counts and exact byte sequences matter when diagnosing RS485
+framing issues.
+
+The `run/` directory is gitignored. It holds anything ephemeral generated
+while driving the device — logs, captured frames, etc. Safe to wipe between
+sessions.
