@@ -6,28 +6,51 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/sys/printk.h>
 
 #define RS485_UART_NODE  DT_ALIAS(rs485_uart)
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
-/* How often the ISR ring buffer is drained.
- * At 115200 baud ~12 bytes arrive per ms; 512 bytes of ring buffer gives
- * >40 ms of headroom before any byte is lost, so 1 ms is conservative.
+/* Two DMA RX buffers. The UARTE driver fills one while we have the
+ * other; when one fills (or the bus idles past RX_TIMEOUT_US) we get a
+ * UART_RX_RDY event and the driver switches to the other. At 115200
+ * baud, 256 B per buffer = ~22 ms before overflow — far more headroom
+ * than the per-byte IRQ path (which only tolerates ~1.4 ms of latency
+ * before the 16-byte UARTE FIFO overruns).
  */
-#define DRAIN_PERIOD_MS 1
+#define RX_BUF_SIZE 256
+static uint8_t rx_buf_a[RX_BUF_SIZE];
+static uint8_t rx_buf_b[RX_BUF_SIZE];
 
-/* Ring buffer between the UART ISR and the drain work item. */
-#define RING_BUF_CAPACITY 512
+/* UART_RX_RDY fires when either the buffer fills or no new byte has
+ * arrived for this many microseconds. 1 ms is short enough to keep
+ * forwarding latency low, long enough to coalesce typical bursts.
+ */
+#define RX_TIMEOUT_US 1000
+
+/* Ring buffer hands data off from the async callback (ISR context)
+ * to the drain worker (system workqueue). 1 KiB = ~89 ms of data at
+ * 115200 baud — survives a brief BLE host stall.
+ */
+#define RING_BUF_CAPACITY 1024
 RING_BUF_DECLARE(rs485_ring, RING_BUF_CAPACITY);
 
 static const struct device *uart_dev = DEVICE_DT_GET(RS485_UART_NODE);
 static const struct gpio_dt_spec de_gpio =
     GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, rs485_de_gpios);
 
+/* Which DMA buffer to hand the driver next (0 = rx_buf_a, 1 = rx_buf_b).
+ * Only mutated from the async callback; atomic for read consistency.
+ */
+static atomic_t next_buf;
+
+static atomic_t dropped_bytes;     /* ring-buffer overflow counter */
+static atomic_t stop_events;       /* UART_RX_STOPPED count (overrun/framing) */
+
 /* ---------------------------------------------------------------------------
- * Periodic drain: ring buffer → rs485_store + optional BLE streaming
+ * Drain worker: ring buffer → rs485_store + optional BLE streaming
  * ---------------------------------------------------------------------------
  */
 static void drain_work_handler(struct k_work *work)
@@ -43,30 +66,56 @@ static void drain_work_handler(struct k_work *work)
 
 static K_WORK_DEFINE(drain_work, drain_work_handler);
 
-static void drain_timer_handler(struct k_timer *timer)
-{
-    ARG_UNUSED(timer);
-    k_work_submit(&drain_work);
-}
-
-static K_TIMER_DEFINE(drain_timer, drain_timer_handler, NULL);
-
 /* ---------------------------------------------------------------------------
- * UART interrupt callback — ISR context
+ * UART async callback — ISR context for the NRFX UARTE driver.
  * ---------------------------------------------------------------------------
  */
-static void uart_irq_callback(const struct device *dev, void *user_data)
+static void uart_async_cb(const struct device *dev,
+                          struct uart_event *evt, void *user_data)
 {
     ARG_UNUSED(user_data);
 
-    while (uart_irq_update(dev) && uart_irq_is_pending(dev)) {
-        if (!uart_irq_rx_ready(dev)) {
-            continue;
+    switch (evt->type) {
+    case UART_RX_RDY: {
+        const uint8_t *src = evt->data.rx.buf + evt->data.rx.offset;
+        uint32_t       len = (uint32_t)evt->data.rx.len;
+        uint32_t       put = ring_buf_put(&rs485_ring, src, len);
+        if (put < len) {
+            atomic_add(&dropped_bytes, (atomic_val_t)(len - put));
         }
-        uint8_t byte;
-        while (uart_fifo_read(dev, &byte, 1) == 1) {
-            ring_buf_put(&rs485_ring, &byte, 1);
-        }
+        k_work_submit(&drain_work);
+        break;
+    }
+
+    case UART_RX_BUF_REQUEST: {
+        /* DMA wants the next buffer to swap to. Hand over whichever
+         * one isn't currently being filled.
+         */
+        int      idx = (int)atomic_get(&next_buf);
+        uint8_t *buf = (idx == 0) ? rx_buf_a : rx_buf_b;
+        (void)uart_rx_buf_rsp(dev, buf, RX_BUF_SIZE);
+        atomic_set(&next_buf, idx ^ 1);
+        break;
+    }
+
+    case UART_RX_BUF_RELEASED:
+        /* Buffer ownership returned — the two static buffers cycle on
+         * their own, nothing to do.
+         */
+        break;
+
+    case UART_RX_DISABLED:
+        /* Should only happen on hard error; restart continuous receive. */
+        atomic_set(&next_buf, 1);
+        (void)uart_rx_enable(dev, rx_buf_a, RX_BUF_SIZE, RX_TIMEOUT_US);
+        break;
+
+    case UART_RX_STOPPED:
+        atomic_inc(&stop_events);
+        break;
+
+    default:
+        break;
     }
 }
 
@@ -86,11 +135,20 @@ int rs485_uart_init(void)
         gpio_pin_configure_dt(&de_gpio, GPIO_OUTPUT_INACTIVE);
     }
 
-    uart_irq_callback_user_data_set(uart_dev, uart_irq_callback, NULL);
-    uart_irq_rx_enable(uart_dev);
+    int err = uart_callback_set(uart_dev, uart_async_cb, NULL);
+    if (err) {
+        printk("rs485: uart_callback_set failed: %d\n", err);
+        return err;
+    }
 
-    k_timer_start(&drain_timer, K_MSEC(DRAIN_PERIOD_MS), K_MSEC(DRAIN_PERIOD_MS));
+    atomic_set(&next_buf, 1);  /* first buffer is rx_buf_a; supply b next */
+    err = uart_rx_enable(uart_dev, rx_buf_a, RX_BUF_SIZE, RX_TIMEOUT_US);
+    if (err) {
+        printk("rs485: uart_rx_enable failed: %d\n", err);
+        return err;
+    }
 
-    printk("rs485: UART receive started\n");
+    printk("rs485: UART async receive started (DMA, 2x %u B buffers)\n",
+           RX_BUF_SIZE);
     return 0;
 }

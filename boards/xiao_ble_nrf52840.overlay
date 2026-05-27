@@ -83,10 +83,20 @@
 	};
 };
 
+/* TIMER2 is dedicated to UARTE0 as the RX byte counter for the async
+ * UART API. Without this, the driver can't reliably count incoming
+ * bytes when the bus runs without hardware flow control, and long
+ * frames get truncated at buffer-switch boundaries.
+ */
+&timer2 {
+	status = "okay";
+};
+
 &uart0 {
 	status = "okay";
 	current-speed = <115200>;
 	pinctrl-0 = <&uart0_default_rs485>;
 	pinctrl-1 = <&uart0_sleep_rs485>;
 	pinctrl-names = "default", "sleep";
+	timer = <&timer2>;
 };
