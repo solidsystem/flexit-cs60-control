@@ -4,65 +4,47 @@
 #include <zephyr/sys/util.h>
 #include <string.h>
 
-static uint8_t store[RS485_STORE_SIZE];
-static uint32_t head;        /* next write offset */
-static uint32_t valid_start; /* offset of oldest stored byte */
-static uint32_t valid_len;   /* number of valid bytes currently in `store` */
+/*
+ * Plain circular byte buffer — no length-prefix framing.
+ *
+ * Invariants:
+ *   head  = index of the NEXT write position (0 … RS485_STORE_SIZE-1)
+ *   fill  = number of valid bytes stored     (0 … RS485_STORE_SIZE)
+ *
+ * Oldest byte is always at:
+ *   (head + RS485_STORE_SIZE - fill) % RS485_STORE_SIZE
+ *
+ * When fill == RS485_STORE_SIZE the buffer is full; new bytes overwrite
+ * the oldest content automatically — no explicit eviction step, so there
+ * is no framing state that can be corrupted.
+ */
+static uint8_t  ring[RS485_STORE_SIZE];
+static uint32_t head;
+static uint32_t fill;
 static K_MUTEX_DEFINE(store_mutex);
-
-static void buf_write(uint32_t pos, const uint8_t *src, uint32_t n)
-{
-    uint32_t first = MIN(RS485_STORE_SIZE - pos, n);
-    memcpy(store + pos, src, first);
-    if (first < n) {
-        memcpy(store, src + first, n - first);
-    }
-}
-
-static void buf_read(uint32_t pos, uint8_t *dst, uint32_t n)
-{
-    uint32_t first = MIN(RS485_STORE_SIZE - pos, n);
-    memcpy(dst, store + pos, first);
-    if (first < n) {
-        memcpy(dst + first, store, n - first);
-    }
-}
-
-static void drop_oldest_frame(void)
-{
-    uint8_t hdr[2];
-    buf_read(valid_start, hdr, 2);
-    uint16_t flen = (uint16_t)hdr[0] | ((uint16_t)hdr[1] << 8);
-    uint32_t total = 2 + flen;
-    valid_start = (valid_start + total) % RS485_STORE_SIZE;
-    valid_len -= total;
-}
 
 void rs485_store_append(const uint8_t *data, size_t len)
 {
-    if (len == 0 || len > 0xFFFFu) {
+    if (len == 0) {
         return;
     }
-    uint32_t total = 2u + (uint32_t)len;
-    if (total > RS485_STORE_SIZE) {
-        return;
+    /* Clip: if the burst is larger than the ring, keep only the tail. */
+    if (len > RS485_STORE_SIZE) {
+        data += len - RS485_STORE_SIZE;
+        len   = RS485_STORE_SIZE;
     }
 
     k_mutex_lock(&store_mutex, K_FOREVER);
 
-    while (valid_len + total > RS485_STORE_SIZE) {
-        drop_oldest_frame();
-    }
+    uint32_t n     = (uint32_t)len;
+    uint32_t first = MIN(RS485_STORE_SIZE - head, n);
 
-    uint8_t hdr[2] = {
-        (uint8_t)(len & 0xFFu),
-        (uint8_t)((len >> 8) & 0xFFu),
-    };
-    buf_write(head, hdr, 2);
-    head = (head + 2) % RS485_STORE_SIZE;
-    buf_write(head, data, (uint32_t)len);
-    head = (head + (uint32_t)len) % RS485_STORE_SIZE;
-    valid_len += total;
+    memcpy(ring + head, data, first);
+    if (first < n) {
+        memcpy(ring, data + first, n - first);
+    }
+    head = (head + n) % RS485_STORE_SIZE;
+    fill = MIN(fill + n, (uint32_t)RS485_STORE_SIZE);
 
     k_mutex_unlock(&store_mutex);
 }
@@ -70,8 +52,16 @@ void rs485_store_append(const uint8_t *data, size_t len)
 size_t rs485_store_snapshot(uint8_t *out, size_t max_out)
 {
     k_mutex_lock(&store_mutex, K_FOREVER);
-    size_t n = MIN((size_t)valid_len, max_out);
-    buf_read(valid_start, out, (uint32_t)n);
+
+    uint32_t n     = MIN((uint32_t)fill, (uint32_t)max_out);
+    uint32_t start = (head + RS485_STORE_SIZE - fill) % RS485_STORE_SIZE;
+    uint32_t first = MIN(RS485_STORE_SIZE - start, n);
+
+    memcpy(out, ring + start, first);
+    if (first < n) {
+        memcpy(out + first, ring, n - first);
+    }
+
     k_mutex_unlock(&store_mutex);
-    return n;
+    return (size_t)n;
 }

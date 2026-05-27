@@ -6,4 +6,6 @@ project(flexitMC3)
 target_sources(app PRIVATE
     src/main.c
     src/ble_transport.c
+    src/rs485_store.c
+    src/rs485_uart.c
 )

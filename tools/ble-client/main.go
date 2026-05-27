@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,7 +19,6 @@ const (
 	deviceName   = "flexitMC3"
 	fixedPasskey = uint32(444999)
 	agentPath    = dbus.ObjectPath("/flexitmc/agent")
-	maxReplies   = 10
 )
 
 var adapter = bluetooth.DefaultAdapter
@@ -46,7 +46,7 @@ func (a *pairingAgent) AuthorizeService(device dbus.ObjectPath, uuid string) *db
 	return nil
 }
 
-func (a *pairingAgent) Cancel() *dbus.Error { return nil }
+func (a *pairingAgent) Cancel() *dbus.Error  { return nil }
 func (a *pairingAgent) Release() *dbus.Error { return nil }
 
 func registerPairingAgent(conn *dbus.Conn) {
@@ -79,14 +79,9 @@ func connectBLE() bluetooth.Device {
 	return device
 }
 
-func cmdStream() {
-	sysbus, err := dbus.SystemBus()
-	must("system dbus", err)
-	registerPairingAgent(sysbus)
-
-	device := connectBLE()
-	defer device.Disconnect()
-
+// openNUS discovers the Nordic UART Service and returns (txChar, rxChar).
+// txChar carries device→client notifications; rxChar is written by the client.
+func openNUS(device bluetooth.Device) (tx, rx bluetooth.DeviceCharacteristic) {
 	srvcs, err := device.DiscoverServices([]bluetooth.UUID{bluetooth.ServiceUUIDNordicUART})
 	must("discover NUS service", err)
 	if len(srvcs) == 0 {
@@ -99,47 +94,181 @@ func cmdStream() {
 	})
 	must("discover NUS characteristics", err)
 
-	var txChar, rxChar bluetooth.DeviceCharacteristic
 	for _, c := range chars {
 		switch c.UUID() {
 		case bluetooth.CharacteristicUUIDUARTTX:
-			txChar = c
+			tx = c
 		case bluetooth.CharacteristicUUIDUARTRX:
-			rxChar = c
+			rx = c
 		}
 	}
+	return tx, rx
+}
 
-	msgCh := make(chan string, maxReplies)
+// cmdFetch connects, sends "fetch", receives the RS485 snapshot and writes
+// raw bytes to outputPath.
+//
+// Protocol (device → client via NUS TX notifications):
+//
+//	Bytes 0-3   : total payload length N, little-endian uint32
+//	Bytes 4-N+3 : raw RS485 bytes, oldest first
+//
+// On Ctrl-C, any bytes already received are written to the file before exit.
+func cmdFetch(outputPath string) {
+	sysbus, err := dbus.SystemBus()
+	must("system dbus", err)
+	registerPairingAgent(sysbus)
+
+	device := connectBLE()
+	defer device.Disconnect()
+
+	txChar, rxChar := openNUS(device)
+
+	notifyCh := make(chan []byte, 64)
 	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
-		select {
-		case msgCh <- string(buf):
-		default:
-		}
+		b := make([]byte, len(buf))
+		copy(b, buf)
+		notifyCh <- b
 	}))
 
-	fmt.Println("Sending 'start'...")
-	_, werr := rxChar.WriteWithoutResponse([]byte("start"))
-	must("write start", werr)
+	fmt.Println("Sending 'fetch'...")
+	_, werr := rxChar.WriteWithoutResponse([]byte("fetch"))
+	must("write fetch", werr)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	deadline := time.After(30 * time.Second)
 
-	count := 0
-	for count < maxReplies {
+	var raw []byte
+	var totalLen uint32
+	headerDone := false
+
+collect:
+	for {
+		if headerDone && uint32(len(raw)) >= 4+totalLen {
+			break collect
+		}
 		select {
-		case msg := <-msgCh:
-			fmt.Print(msg)
-			count++
+		case chunk := <-notifyCh:
+			raw = append(raw, chunk...)
+			if !headerDone && len(raw) >= 4 {
+				totalLen = uint32(raw[0]) | uint32(raw[1])<<8 |
+					uint32(raw[2])<<16 | uint32(raw[3])<<24
+				fmt.Printf("Expecting %d bytes of RS485 snapshot\n", totalLen)
+				headerDone = true
+				if totalLen == 0 {
+					break collect
+				}
+			}
 		case <-sig:
-			fmt.Println("\nInterrupted")
+			fmt.Println("\nInterrupted — writing partial data")
+			writeFetchResult(outputPath, raw, headerDone, totalLen, true)
+			return
+		case <-deadline:
+			recvd := 0
+			if len(raw) > 4 {
+				recvd = len(raw) - 4
+			}
+			if headerDone {
+				fmt.Fprintf(os.Stderr, "Timeout: received %d/%d bytes — writing partial data\n",
+					recvd, totalLen)
+				writeFetchResult(outputPath, raw, headerDone, totalLen, true)
+			} else {
+				log.Fatal("Timeout waiting for fetch response")
+			}
 			return
 		}
 	}
 
-	fmt.Println("Sending 'stop'...")
-	_, werr2 := rxChar.WriteWithoutResponse([]byte("stop"))
-	must("write stop", werr2)
-	fmt.Printf("Done — received %d replies.\n", count)
+	writeFetchResult(outputPath, raw, headerDone, totalLen, false)
+}
+
+// writeFetchResult extracts the payload from the raw accumulated bytes and
+// writes it to outputPath. partial=true means the transfer was cut short.
+func writeFetchResult(outputPath string, raw []byte, headerDone bool, totalLen uint32, partial bool) {
+	if !headerDone || len(raw) < 4 {
+		fmt.Fprintln(os.Stderr, "No data received — nothing written")
+		return
+	}
+
+	end := 4 + int(totalLen)
+	if end > len(raw) {
+		end = len(raw) // clamp to what we actually have
+	}
+	snapshot := raw[4:end]
+
+	if err := os.WriteFile(outputPath, snapshot, 0o644); err != nil {
+		log.Fatalf("write output: %v", err)
+	}
+
+	if partial {
+		fmt.Printf("Wrote %d/%d bytes (partial) to %s\n", len(snapshot), totalLen, outputPath)
+	} else {
+		fmt.Printf("Wrote %d bytes to %s\n", len(snapshot), outputPath)
+	}
+}
+
+// cmdStream connects, sends "stream", and appends every RS485 notification
+// to outputPath until Ctrl-C. Sends "stop" before disconnecting.
+func cmdStream(outputPath string) {
+	sysbus, err := dbus.SystemBus()
+	must("system dbus", err)
+	registerPairingAgent(sysbus)
+
+	device := connectBLE()
+	defer device.Disconnect()
+
+	txChar, rxChar := openNUS(device)
+
+	f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	must("open output file", err)
+
+	// Writer goroutine owns the file; closed once writeCh is drained.
+	writeCh := make(chan []byte, 256)
+	var wg sync.WaitGroup
+	var written int64
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for data := range writeCh {
+			n, werr := f.Write(data)
+			if werr != nil {
+				log.Printf("file write error: %v", werr)
+			}
+			written += int64(n)
+		}
+		f.Close()
+	}()
+
+	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
+		b := make([]byte, len(buf))
+		copy(b, buf)
+		select {
+		case writeCh <- b:
+		default:
+			// channel full — notification dropped (very unlikely at 256 slots)
+		}
+	}))
+
+	fmt.Println("Sending 'stream'...")
+	_, werr := rxChar.WriteWithoutResponse([]byte("stream"))
+	must("write stream", werr)
+
+	fmt.Printf("Streaming RS485 data to %s  (Ctrl-C to stop)...\n", outputPath)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	fmt.Println("\nSending 'stop'...")
+	rxChar.WriteWithoutResponse([]byte("stop"))        //nolint:errcheck
+	time.Sleep(200 * time.Millisecond)                 // let last notifications arrive
+
+	close(writeCh)
+	wg.Wait()
+
+	fmt.Printf("Done. Wrote %d bytes to %s\n", written, outputPath)
 }
 
 func cmdFlash(imagePath string) {
@@ -170,30 +299,25 @@ func cmdFlash(imagePath string) {
 	smp, err := newSMPTransport(chars[0])
 	must("init SMP transport", err)
 
-	// Step 1: list current images
 	fmt.Println("Reading image list...")
 	list, err := smp.imageList()
 	must("imageList", err)
 	fmt.Println("Images:", list)
 
-	// Step 2: upload
 	fmt.Println("Uploading image...")
 	must("imageUpload", smp.imageUpload(imagePath, 0))
 	fmt.Println("Upload done.")
 
-	// Step 3: read slot-1 hash from device (MCUboot TLV hash, not file SHA256)
 	fmt.Println("Reading slot-1 hash...")
 	hash, err := smp.imageSlot1Hash()
 	must("imageSlot1Hash", err)
 	fmt.Printf("Slot-1 hash: %x\n", hash)
 
-	// Step 4: mark for test
 	fmt.Println("Marking image for test...")
 	must("imageTest", smp.imageTest(hash))
 
-	// Step 4: reset
 	fmt.Println("Resetting device...")
-	_ = smp.osReset() // device disconnects immediately, ignore timeout error
+	_ = smp.osReset()
 
 	fmt.Printf("Device resetting. Slot-1 hash: %x\n", hash)
 	fmt.Println("Wait ~10s for boot, then run:")
@@ -286,12 +410,13 @@ func cmdList() {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  %s stream               — NUS ping/reply test (sends 'start', receives 10 replies, sends 'stop')
-  %s flash <image.bin>    — Upload signed firmware image via SMP over BLE
-  %s confirm <hash-hex>   — Confirm image after test-boot (run after 'flash')
-  %s list                 — List firmware images via SMP over BLE
-  %s scan                 — Scan and print RSSI for flexitMC3 (Ctrl-C to stop)
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+  %s fetch <output.bin>    — One-shot snapshot of last 2 KiB of RS485 traffic
+  %s stream <output.bin>   — Stream live RS485 traffic to file (Ctrl-C to stop)
+  %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
+  %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
+  %s list                  — List firmware images via SMP over BLE
+  %s scan                  — Scan and print RSSI for flexitMC3 (Ctrl-C to stop)
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -301,8 +426,16 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "fetch":
+		if len(os.Args) < 3 {
+			usage()
+		}
+		cmdFetch(os.Args[2])
 	case "stream":
-		cmdStream()
+		if len(os.Args) < 3 {
+			usage()
+		}
+		cmdStream(os.Args[2])
 	case "flash":
 		if len(os.Args) < 3 {
 			usage()

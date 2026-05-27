@@ -3,6 +3,7 @@
 #include <zephyr/sys/printk.h>
 
 #include "ble_transport.h"
+#include "rs485_uart.h"
 
 static const struct gpio_dt_spec green_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
@@ -12,6 +13,10 @@ int main(void)
     printk("flexitMC3 starting.\n");
 
     gpio_pin_configure_dt(&green_led, GPIO_OUTPUT_INACTIVE);
+
+    if (rs485_uart_init() < 0) {
+        printk("warning: RS485 UART init failed — continuing without RS485 receive\n");
+    }
 
     if (ble_transport_init() < 0) {
         printk("error: BLE transport init failed\n");
