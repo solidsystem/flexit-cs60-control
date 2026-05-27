@@ -1,4 +1,4 @@
-# RS485 traffic analysis — Flexit CL60 / CS60 ventilation system
+# RS485 traffic analysis — Flexit CI60 / CS60 ventilation system
 
 Captures taken with the on-board RS485 listener on the XIAO BLE
 (see `src/rs485_uart.c`, `src/ble_transport.c`), streamed live to file
@@ -32,10 +32,10 @@ continuously at ~8 cycles/s.
 | Baud rate | **115200 / 8N1** | Frames decode cleanly. Matches the ESPHome Flexit-Modbus-Server reference. |
 | Wiring    | Half-duplex RS485, DE/RE held low (receive-only) | We see master and slave traffic on the same line. |
 | Bus master | Flexit **CS60** | All polling traffic originates from one party. |
-| Polled slave | Flexit **CL60 panel @ addr 2** | All addr-2 traffic; no other unicast addresses ever appear. |
+| Polled slave | Flexit **CI60 panel @ addr 2** | All addr-2 traffic; no other unicast addresses ever appear. |
 | Broadcasts | addr `0x00` | All FC06, FC10 and FC65 use addr 0 (Modbus broadcast). |
 
-The CS60 is the only master. The CL60 panel only responds — never
+The CS60 is the only master. The CI60 panel only responds — never
 initiates. Broadcasts are not echoed by slaves.
 
 > The CS60 *intentionally ignores* Modbus-RTU inter-frame timing — see

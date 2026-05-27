@@ -14,7 +14,7 @@ Zephyr/nRF Connect SDK application for Seeed XIAO BLE (nRF52840) with MCUboot
 The board sits on a **Seeed XIAO-RS485-Expansion-Board**
 (https://wiki.seeedstudio.com/XIAO-RS485-Expansion-Board/). 
 
-The RS485 transceiver is connected (via rj12 connector) to **flexit cl60** control panel, 
+The RS485 transceiver is connected (via rj12 connector) to **flexit ci60** control panel, 
 which is connected to **flexit cs60**. 
 
 For documentation on mentioned flexit hardware components, read pdf files in docs/ directory.
