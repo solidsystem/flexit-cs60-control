@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -362,9 +364,11 @@ func cmdConfirm(hashHex string) {
 	fmt.Println("Image confirmed. Firmware update complete.")
 }
 
-// cmdState connects, sends "state", prints the single-line snapshot
-// returned by the firmware's panel_mirror module, then disconnects.
-func cmdState() {
+// cmdState connects, sends "state", prints the snapshot returned by the
+// firmware's panel_mirror module, then disconnects.
+// If humanFriendly is true the compact firmware line is parsed and rendered
+// as a multiline human-readable report; otherwise it is printed as-is.
+func cmdState(humanFriendly bool) {
 	sysbus, err := dbus.SystemBus()
 	must("system dbus", err)
 	registerPairingAgent(sysbus)
@@ -394,18 +398,136 @@ func cmdState() {
 		case chunk := <-notifyCh:
 			line = append(line, chunk...)
 			if i := indexByte(line, '\n'); i >= 0 {
-				fmt.Println(string(line[:i]))
+				s := string(line[:i])
+				if humanFriendly {
+					formatStateHuman(s)
+				} else {
+					fmt.Println(s)
+				}
 				return
 			}
 		case <-deadline:
 			if len(line) > 0 {
-				fmt.Println(string(line))
+				s := strings.TrimRight(string(line), "\r\n")
+				if humanFriendly {
+					formatStateHuman(s)
+				} else {
+					fmt.Println(s)
+				}
 			} else {
 				log.Fatal("Timeout waiting for state response")
 			}
 			return
 		}
 	}
+}
+
+// formatStateHuman parses the compact one-line firmware state string and
+// prints a verbose, multiline human-readable report to stdout.
+//
+// Expected firmware format (space-separated key=value tokens):
+//
+//	MODE=1 SET=19.6 SET2=19.6 T_SUP=19.5 T_EXT=n/a T_OUT=12.4 T_RET=n/a
+//	PCT_COOL=0 PCT_HX=13 PCT_HEAT=0 PCT_FAN=50
+//	UNK1=0x0DA8 UNK2=0x0000
+//	FC10=182 FC06=84 CRCERR=0 LAST_MS=20746
+//	CNT[0x014F]=3447@0s CNT[0x0155]=12929@0s …
+func formatStateHuman(line string) {
+	kv := make(map[string]string)
+	var cntKeys []string // ordered list of CNT[…] keys
+
+	for _, f := range strings.Fields(line) {
+		idx := strings.IndexByte(f, '=')
+		if idx < 0 {
+			continue
+		}
+		key := f[:idx]
+		val := f[idx+1:]
+		kv[key] = val
+		if strings.HasPrefix(key, "CNT[") {
+			cntKeys = append(cntKeys, key)
+		}
+	}
+
+	modeNames := map[string]string{
+		"0": "Stop",
+		"1": "Minimum",
+		"2": "Normal",
+		"3": "Maximum",
+	}
+	modeName, ok := modeNames[kv["MODE"]]
+	if !ok {
+		modeName = "Unknown"
+	}
+
+	sep := strings.Repeat("═", 56)
+	fmt.Println(sep)
+	fmt.Println(" Flexit Panel State")
+	fmt.Println(sep)
+	fmt.Println()
+
+	// --- Operating mode ---
+	fmt.Printf("  Mode:              %s — %s\n", kv["MODE"], modeName)
+	fmt.Println()
+
+	// --- Temperatures ---
+	fmt.Println("  Temperatures")
+	fmt.Printf("    Setpoint:        %s\n", formatTempHuman(kv["SET"]))
+	fmt.Printf("    Setpoint 2:      %s\n", formatTempHuman(kv["SET2"]))
+	fmt.Printf("    Supply air:      %s\n", formatTempHuman(kv["T_SUP"]))
+	fmt.Printf("    Extract air:     %s\n", formatTempHuman(kv["T_EXT"]))
+	fmt.Printf("    Outdoor air:     %s\n", formatTempHuman(kv["T_OUT"]))
+	fmt.Printf("    Return water:    %s\n", formatTempHuman(kv["T_RET"]))
+	fmt.Println()
+
+	// --- Actuators ---
+	fmt.Println("  Actuators")
+	fmt.Printf("    Supply fan:      %s %%\n", kv["PCT_FAN"])
+	fmt.Printf("    Heat exchanger:  %s %%\n", kv["PCT_HX"])
+	fmt.Printf("    Heating:         %s %%\n", kv["PCT_HEAT"])
+	fmt.Printf("    Cooling:         %s %%\n", kv["PCT_COOL"])
+	fmt.Println()
+
+	// --- Counters (FC06 runtime registers) ---
+	if len(cntKeys) > 0 {
+		fmt.Println("  Runtime counters  (operating-minute registers)")
+		for _, k := range cntKeys {
+			addr := k[4 : len(k)-1] // strip "CNT[" prefix and "]" suffix
+			val := kv[k]
+			atIdx := strings.LastIndexByte(val, '@')
+			if atIdx >= 0 {
+				countVal := val[:atIdx]
+				age := val[atIdx+1:]
+				fmt.Printf("    %-8s  %s  (updated %s ago)\n", addr, countVal, age)
+			} else {
+				fmt.Printf("    %-8s  %s\n", addr, val)
+			}
+		}
+		fmt.Println()
+	}
+
+	// --- Diagnostics ---
+	fmt.Println("  Diagnostics")
+	fmt.Printf("    FC10 frames:     %s\n", kv["FC10"])
+	fmt.Printf("    FC06 frames:     %s\n", kv["FC06"])
+	fmt.Printf("    CRC errors:      %s\n", kv["CRCERR"])
+	if lastMs, err := strconv.ParseInt(kv["LAST_MS"], 10, 64); err == nil {
+		fmt.Printf("    Last FC10 uptime:  %.3f s\n", float64(lastMs)/1000.0)
+	}
+	fmt.Printf("    Unknown reg 1:   %s\n", kv["UNK1"])
+	fmt.Printf("    Unknown reg 2:   %s\n", kv["UNK2"])
+	fmt.Println()
+
+	fmt.Println(sep)
+}
+
+// formatTempHuman returns a display string for a temperature value.
+// "n/a" is expanded to indicate the sensor is not present.
+func formatTempHuman(v string) string {
+	if v == "n/a" || v == "" {
+		return "n/a  (sensor not present)"
+	}
+	return v + " °C"
 }
 
 func indexByte(b []byte, c byte) int {
@@ -467,7 +589,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
   %s fetch <output.bin>    — One-shot snapshot of last 2 KiB of RS485 traffic
   %s stream <output.bin>   — Stream live RS485 traffic to file (Ctrl-C to stop)
-  %s state                 — Print one-line decoded panel state (mode, temps, ...)
+  %s state [--human-friendly]  — Print decoded panel state; --human-friendly for verbose multiline output
   %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
@@ -503,7 +625,13 @@ func main() {
 		}
 		cmdConfirm(os.Args[2])
 	case "state":
-		cmdState()
+		humanFriendly := false
+		for _, arg := range os.Args[2:] {
+			if arg == "--human-friendly" {
+				humanFriendly = true
+			}
+		}
+		cmdState(humanFriendly)
 	case "list":
 		cmdList()
 	case "scan":
