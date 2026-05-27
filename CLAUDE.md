@@ -25,9 +25,12 @@ This project is very similar to the solution we want to implement:
 
 ## Environment
 
-To run commands in shell:
-- source this script `~/ncs/v3.3.0/zephyr/zephyr-env.sh`
-- use this command prefix to set required toolchain environment: `nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 --shell`
+Commands must be run with the NCS toolchain. The pattern is:
+
+```bash
+source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
+nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- <command>
+```
 
 If needed, read about managing and initializing SDK toolchain at https://docs.nordicsemi.com/bundle/nrfutil/page/nrfutil-toolchain-manager/nrfutil-toolchain-manager.html
 
@@ -35,26 +38,32 @@ If needed, read about managing and initializing SDK toolchain at https://docs.no
 
 ```bash
 # Build
-west build -b xiao_ble/nrf52840 --sysbuild --build-dir build
+nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+    west build -b xiao_ble/nrf52840 --sysbuild --build-dir build
 
 # Pristine build (clean slate)
-west build -b xiao_ble/nrf52840 --sysbuild --pristine --build-dir build
+nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+    west build -b xiao_ble/nrf52840 --sysbuild --pristine --build-dir build
 
 # Kconfig menu
-west build --build-dir build -t menuconfig
+nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+    west build --build-dir build -t menuconfig
 
 # Clean
-west build --build-dir build -t clean
+nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+    west build --build-dir build -t clean
 ```
 
-## Flashing the xiao_ble (USB DFU via mcu-manager)
+## Flashing
 
-The xiao_ble has **no debug programmer attached** — it is connected by USB only
-(VID:PID `2fe3:0004`, typically `/dev/ttyACM2`). It runs MCUboot with an MCUmgr
-SMP server over USB CDC ACM, so firmware is delivered as a DFU upload.
+**Normal workflow: BLE DFU** — see the `BLE client` section below.
 
-**Do not use `west flash`** — it would target a J-Link belonging to a separate
-nrf52840dk board that may be on the bus, not the xiao_ble.
+**Do not use `west flash`** — it targets the J-Link on the nrf52840dk, not the xiao_ble.
+
+### USB DFU via mcu-manager
+
+Use this if xiao_ble is connected to USB, or BLE DFU does not work (e.g. broken firmware). The xiao_ble USB
+connection is VID:PID `2fe3:0004`, typically `/dev/ttyACM2`.
 
 ```bash
 # 1. Upload to slot 1
@@ -72,6 +81,59 @@ nrfutil mcu-manager serial --serial-port /dev/ttyACM2 reset
 nrfutil mcu-manager serial --serial-port /dev/ttyACM2 image-confirm --hash <slot0-hash-after-swap>
 ```
 
-The flashed firmware must keep `CONFIG_MCUMGR=y`, `CONFIG_MCUMGR_TRANSPORT_UART=y`,
+The firmware must keep `CONFIG_MCUMGR=y`, `CONFIG_MCUMGR_TRANSPORT_UART=y`,
 `CONFIG_MCUMGR_GRP_IMG=y`, `CONFIG_MCUMGR_GRP_OS=y`, `CONFIG_IMG_MANAGER=y` (and
 flash/CBOR/CRC deps) so the *next* update has an SMP server to talk to.
+
+## BLE client (`tools/ble-client`)
+
+A Go CLI tool that connects to the xiao_ble over BLE using an nrf52840dk running
+`hci_usb` as the HCI adapter (appears as `hci0` in BlueZ). Handles BLE pairing
+automatically with fixed passkey `444999`.
+
+```bash
+cd tools/ble-client
+go build -o ble-client .
+```
+
+### Subcommands
+
+```bash
+# NUS ping/reply test: sends 'start', prints 10 replies, sends 'stop'
+./ble-client stream
+
+# Scan and print RSSI (useful to check signal before flashing)
+./ble-client scan
+
+# Flash firmware over BLE via SMP (upload → test-mark → reset)
+./ble-client flash build/flexitMC/zephyr/zephyr.signed.bin
+
+# Confirm after reboot (run within ~60s of flash completing)
+./ble-client confirm <hash-hex>
+
+# List firmware images in slot 0 and slot 1
+./ble-client list
+```
+
+### BLE DFU workflow
+
+```bash
+# 1. Build
+source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
+nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+    west build -b xiao_ble/nrf52840 --sysbuild --build-dir build
+
+# 2. Flash over BLE (prints the hash and the confirm command to run next)
+cd tools/ble-client
+./ble-client flash ../../build/flexitMC/zephyr/zephyr.signed.bin
+
+# 3. Confirm after device reboots (~10s)
+./ble-client confirm <hash printed by flash>
+```
+
+**Tip:** If connection fails with `le-connection-abort-by-local`, check signal strength
+with `./ble-client scan` first (need -75 dBm or better). If signal is fine, restart
+BlueZ: `sudo systemctl restart bluetooth`.
+
+The firmware must keep `CONFIG_MCUMGR_TRANSPORT_BT=y` and
+`CONFIG_MCUMGR_TRANSPORT_BT_PERM_RW_AUTHEN=y` so the BLE SMP server is active.
