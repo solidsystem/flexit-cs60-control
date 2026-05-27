@@ -248,21 +248,40 @@ this capture (no temperature change, no timer button, etc.).
 
 ## 6. Implications for the project goal
 
-We want to act as a programmable Modbus interface to the panel,
-replacing the role of the Flexit CL66.
+The XIAO is a **smarthouse bridge**: it sits on the Flexit panel bus
+on one side and exposes the ventilation system to a home-automation
+controller on the other side, via BLE or Zigbee (transport not yet
+decided).
+
+That splits the work cleanly:
+
+- **Panel-bus side** — speak the proprietary Flexit Modbus dialect
+  documented above. *Read* via passive sniffing of FC10 broadcasts;
+  *write* via the slave + coil + FC65 cycle observed in §5.2.
+- **Smarthouse side** — expose the mirrored state and a small set
+  of commands over BLE or Zigbee. The interface design is out of
+  scope for this document.
 
 ### Confirmed by direct observation
 
-1. **Slave addressing**: the panel sits at addr `2`. Any address ≠ 2
-   (and ≠ 0 broadcast) is free. ESPHome defaults to `1` but the
-   project README convention is `3`; either works.
+1. **Read-only monitoring needs no Modbus slave.** The FC10 status
+   broadcast at `0x00BE` (85 regs, every ~120 ms) carries MODE, all
+   four temperature inputs, all four percentage outputs and the
+   runtime counters. Just decoding the broadcast stream is enough
+   for everything the smarthouse needs to *display*.
 
-2. **The CS60 only polls/acks an active slave.** It reacts to coil
-   flags — if no slave raises a coil, FC03 and FC65 never appear. This
-   matches the ESPHome architecture; our slave gets attention only
-   when we *push* a command coil.
+2. **Writing back to the system needs a Modbus slave.** Commands
+   from outside the panel only enter the system via the coil + FC65
+   handshake (§5.2). To dim/boost the fan from the smarthouse, the
+   XIAO must register as a Modbus slave that the CS60 polls.
 
-3. **The complete command cycle** for a slave-initiated command is:
+3. **The CS60 only polls/acks an active slave.** It reacts to coil
+   flags — if no slave raises a coil, FC03 and FC65 never appear.
+   So a slave that never asserts a coil is effectively invisible to
+   the CS60. For pure read-only operation, no slave is needed at
+   all.
+
+4. **The complete command cycle** for a slave-initiated command is:
    1. Slave sets `coil[X] = 1`, `holding_reg[X] = value`.
    2. CS60 sees the coil on its next FC01 ReadCoils poll (~120 ms).
    3. CS60 issues FC03 `read 1 reg at addr X`, slave responds with
@@ -271,22 +290,21 @@ replacing the role of the Flexit CL66.
       treat this as `setHoldingRegister(X, value); setCoil(X, 0);`.
    5. CS60 broadcasts FC10 status block reflecting the new state.
 
-4. **Status block at `0x00BE`** (85 registers, broadcast every ~120 ms)
-   is the canonical source for current panel state. We can derive
-   MODE, all four temperature inputs, all four percentage outputs and
-   the runtime counters from this block alone — no slave needed for
-   read-only observation.
+5. **Slave addressing**: the panel sits at addr `2`. Any address ≠ 2
+   (and ≠ 0 broadcast) is free. ESPHome defaults to `1`; `3` is
+   another reasonable choice.
 
-5. **Sensor-not-present sentinel**: extract-air and return-water
+6. **Sensor-not-present sentinel**: extract-air and return-water
    sensors absent from this installation produce 16-bit signed values
    that decode as -187.5 °C, -250.0 °C, etc. These are not real
-   readings; they're sentinel codes. We should mask these out when
-   exposing values upstream.
+   readings; they're sentinel codes. The smarthouse side should
+   surface them as "sensor not present" rather than passing the raw
+   degree value through.
 
-6. **Fan-speed table**: in this installation, Min=50 %, Normal=69 %,
+7. **Fan-speed table**: in this installation, Min=50 %, Normal=69 %,
    Max=100 %. These are the per-mode setpoints stored in `CMD_*`
    registers (`0x02/0x03/0x04` for supply fan, `0x07/0x08/0x09` for
-   extract fan) — i.e. they're configurable.
+   extract fan) — i.e. they're configurable on the panel side.
 
 ### Open / still to verify
 
@@ -303,36 +321,40 @@ replacing the role of the Flexit CL66.
   zeros plus a few constants (`0xDD75`, `0x001A`, etc.); none changed
   during the panel-press capture.
 
-### Required next steps
+### Required next steps on the panel-bus side
 
-1. **Implement a Modbus RTU slave** in firmware at addr `3` covering
-   the five function codes the CS60 actually uses:
+1. **Phase 1 — passive monitoring.** Parse the FC10 broadcast into a
+   local mirror of the panel state (MODE, four temperatures, four
+   percentages, the runtime counters) and surface a few sentinel
+   constants so the smarthouse layer can show "sensor n/a". This is
+   strictly read-only — no slave registration, no risk of disturbing
+   the existing CS60↔panel conversation.
+
+2. **Phase 2 — Modbus slave for writes.** Register at addr `3`
+   covering the five function codes the CS60 actually uses:
    - **FC01 ReadCoils** — keep a coil table of at least the
      `CMD_*` addresses we want to push (start with coil 0 = CMD_MODE).
    - **FC03 ReadHoldingRegs** — respond to single-register reads
      against any address we've armed via coil.
-   - **FC06 / FC10** broadcasts from addr 0 — soak up runtime
-     counters and the status block to mirror state locally.
+   - **FC06 / FC10** broadcasts from addr 0 — already handled by
+     phase 1 (passive mirror); just keep doing it.
    - **FC65** broadcasts — clear the matching coil and stamp the
-     matching register with the carried value.
+     matching register with the carried value (closes the cycle the
+     slave opened).
 
    Per ESPHome, disable FC04, FC05, FC0F, FC11.
 
-2. **Coil ↔ register address pairing.** Every command we want to
+3. **Coil ↔ register address pairing.** Every command we want to
    issue needs storage in *both* tables at the same address. The
    coil is the "fresh" flag; the register holds the value.
 
-3. **Mirror the FC10 status block.** Parse the 85-register payload
-   into a local struct on every receive. That gives us a live shadow
-   of the CS60's view of the system.
-
-4. **Pick a free coil/register address for our commands.** Per the
-   ESPHome `HoldingRegisterIndex` enum, useful command slots include
-   `0x00` (CMD_MODE), `0x02..0x09` (fan setpoints), `0x0C..0x0E`
-   (temperature setpoints), `0x13A..0x13C` (timer / clear alarms),
-   `0x116` (clear filter alarm). For a first test, mirroring the
-   panel's behaviour with `CMD_MODE` (coil 0 + reg 0) is the cleanest
-   starting point.
+4. **Pick command slots from the ESPHome `HoldingRegisterIndex`
+   enum.** Useful targets: `0x00` (CMD_MODE), `0x02..0x09` (fan
+   setpoints), `0x0C..0x0E` (temperature setpoints), `0x13A..0x13C`
+   (timer / clear alarms), `0x116` (clear filter alarm). For a first
+   write test, mirroring the panel's behaviour with `CMD_MODE` (coil
+   0 + reg 0) is the cleanest starting point — the captured cycle in
+   §5.2 is exactly what our slave needs to emit.
 
 ---
 

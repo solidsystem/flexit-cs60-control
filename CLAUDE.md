@@ -1,5 +1,13 @@
 # flexitMC3
 
+## Project goal
+
+The project goal is to create a smarthouse device that allows monitoring and controlling 
+the flexit ventilation system. The smarthouse controller will connect to xiao_ble with
+either bluetooth or zigbee (not decided which to implement yet).
+
+## hardware info
+
 Zephyr/nRF Connect SDK application for Seeed XIAO BLE (nRF52840) with MCUboot
 (https://wiki.seeedstudio.com/XIAO_BLE/).
 
@@ -8,9 +16,6 @@ The board sits on a **Seeed XIAO-RS485-Expansion-Board**
 
 The RS485 transceiver is connected (via rj12 connector) to **flexit cl60** control panel, 
 which is connected to **flexit cs60**. 
-
-The project goal is to be a programmable modbus interface to the flexit control panel, 
-without using a flexit cl66 device.
 
 For documentation on mentioned flexit hardware components, read pdf files in docs/ directory.
 
