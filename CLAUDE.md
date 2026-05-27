@@ -12,7 +12,7 @@ which is connected to **flexit cs60**.
 The project goal is to be a programmable modbus interface to the flexit control panel, 
 without using a flexit cl66 device.
 
-For documentation on mentioned flexit hardware components, read pdf files docs directory.
+For documentation on mentioned flexit hardware components, read pdf files in docs/ directory.
 
 This project is very similar to the solution we want to implement:
 - https://github.com/MSkjel/esphome-flexit-modbus-server/tree/main
@@ -22,6 +22,8 @@ This project is very similar to the solution we want to implement:
 - NCS version: v3.3.0
 - SDK: `~/ncs/v3.3.0`
 - Board: `xiao_ble/nrf52840`
+
+When creating helper scripts/software, do it in golang if possible.
 
 ## Environment
 
