@@ -1,6 +1,8 @@
 #include "ble_transport.h"
 #include "rs485_store.h"
+#include "panel_mirror.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -276,17 +278,100 @@ static struct bt_conn_auth_info_cb auth_info_cb = {
 };
 
 /* ---------------------------------------------------------------------------
+ * `state` command — render the panel-mirror snapshot
+ *
+ * Single-line ASCII, key=value pairs separated by spaces, terminated by '\n'.
+ * Temperatures are formatted as `N.D` (one decimal, ×10 raw); sensors that
+ * are not present surface as "n/a". The line is appended with one
+ * `CNT[0xAAAA]=VVVV@Ts` slot per observed FC06 counter. The whole thing
+ * fits in one ATT MTU (498-3 = 495 bytes; the line tops out around ~360).
+ * ---------------------------------------------------------------------------
+ */
+static void format_temp_x10(char *out, size_t cap, int16_t x10, bool present)
+{
+    if (!present) {
+        snprintf(out, cap, "n/a");
+        return;
+    }
+    if (x10 < 0) {
+        snprintf(out, cap, "-%d.%d", (-x10) / 10, (-x10) % 10);
+    } else {
+        snprintf(out, cap, "%d.%d", x10 / 10, x10 % 10);
+    }
+}
+
+static size_t format_state_line(char *buf, size_t cap)
+{
+    struct panel_mirror_state s;
+    panel_mirror_snapshot(&s);
+
+    char t_set[16], t_set2[16], t_sup[16], t_ext[16], t_out[16], t_ret[16];
+    format_temp_x10(t_set,  sizeof(t_set),  s.temp_setpoint_x10,     true);
+    format_temp_x10(t_set2, sizeof(t_set2), s.temp_setpoint_2_x10,   true);
+    format_temp_x10(t_sup,  sizeof(t_sup),  s.temp_supply_air_x10,   true);
+    format_temp_x10(t_out,  sizeof(t_out),  s.temp_outdoor_air_x10,  true);
+    format_temp_x10(t_ext,  sizeof(t_ext),  s.temp_extract_air_x10,
+                    (s.sensors_present & PANEL_MIRROR_SENSOR_EXTRACT_AIR) != 0);
+    format_temp_x10(t_ret,  sizeof(t_ret),  s.temp_return_water_x10,
+                    (s.sensors_present & PANEL_MIRROR_SENSOR_RETURN_WATER) != 0);
+
+    int w = snprintf(buf, cap,
+        "MODE=%u SET=%s SET2=%s "
+        "T_SUP=%s T_EXT=%s T_OUT=%s T_RET=%s "
+        "PCT_COOL=%u PCT_HX=%u PCT_HEAT=%u PCT_FAN=%u "
+        "UNK1=0x%04X UNK2=0x%04X "
+        "FC10=%u FC06=%u CRCERR=%u LAST_MS=%llu",
+        s.mode, t_set, t_set2,
+        t_sup, t_ext, t_out, t_ret,
+        s.pct_cooling, s.pct_heat_exchanger, s.pct_heating, s.pct_supply_fan,
+        s.unknown_1, s.unknown_2,
+        s.fc10_frames, s.fc06_frames, s.crc_failures,
+        (unsigned long long)s.last_fc10_uptime_ms);
+
+    if (w < 0) {
+        return 0;
+    }
+    size_t pos = ((size_t)w < cap) ? (size_t)w : cap - 1;
+
+    uint64_t now = (uint64_t)k_uptime_get();
+    for (int i = 0; i < PANEL_MIRROR_COUNTER_SLOTS && pos < cap - 1; i++) {
+        if (!s.counters[i].used) {
+            continue;
+        }
+        uint64_t age_s = (now - s.counters[i].at_ms) / 1000u;
+        w = snprintf(buf + pos, cap - pos,
+                     " CNT[0x%04X]=%u@%llus",
+                     s.counters[i].addr, s.counters[i].value,
+                     (unsigned long long)age_s);
+        if (w < 0) {
+            break;
+        }
+        if ((size_t)w >= cap - pos) {
+            pos = cap - 1;
+            break;
+        }
+        pos += (size_t)w;
+    }
+
+    if (pos < cap - 1) {
+        buf[pos++] = '\n';
+    }
+    buf[pos] = '\0';
+    return pos;
+}
+
+/* ---------------------------------------------------------------------------
  * NUS receive — command dispatch
  *
  * Commands (sent by ble-client via NUS RX write):
  *   "fetch"  — take a one-shot snapshot of rs485_store and send it
  *   "stream" — start forwarding RS485 bytes in real time over NUS TX
  *   "stop"   — stop streaming
+ *   "state"  — single-line snapshot of the decoded panel mirror
  * ---------------------------------------------------------------------------
  */
 static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len)
 {
-    ARG_UNUSED(conn);
     printk("NUS RX: %.*s\n", len, (const char *)data);
 
     if (len >= 5 && memcmp(data, "fetch", 5) == 0) {
@@ -298,6 +383,14 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
     } else if (len >= 6 && memcmp(data, "stream", 6) == 0) {
         printk("stream: started\n");
         atomic_set(&stream_active, 1);
+
+    } else if (len >= 5 && memcmp(data, "state", 5) == 0) {
+        char   line[480];
+        size_t n = format_state_line(line, sizeof(line));
+        int    err = bt_nus_send(conn, (const uint8_t *)line, (uint16_t)n);
+        if (err) {
+            printk("state: bt_nus_send failed: %d\n", err);
+        }
 
     } else if (len >= 4 && memcmp(data, "stop", 4) == 0) {
         printk("stream: stopped\n");

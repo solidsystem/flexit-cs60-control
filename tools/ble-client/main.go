@@ -362,6 +362,61 @@ func cmdConfirm(hashHex string) {
 	fmt.Println("Image confirmed. Firmware update complete.")
 }
 
+// cmdState connects, sends "state", prints the single-line snapshot
+// returned by the firmware's panel_mirror module, then disconnects.
+func cmdState() {
+	sysbus, err := dbus.SystemBus()
+	must("system dbus", err)
+	registerPairingAgent(sysbus)
+
+	device := connectBLE()
+	defer device.Disconnect()
+
+	txChar, rxChar := openNUS(device)
+
+	notifyCh := make(chan []byte, 16)
+	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
+		b := make([]byte, len(buf))
+		copy(b, buf)
+		notifyCh <- b
+	}))
+
+	_, werr := rxChar.WriteWithoutResponse([]byte("state"))
+	must("write state", werr)
+
+	// The firmware sends the full line in a single NUS notification, but
+	// long ATT MTUs are not guaranteed on every BlueZ stack — keep
+	// accumulating until we see a '\n' or hit the timeout.
+	var line []byte
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case chunk := <-notifyCh:
+			line = append(line, chunk...)
+			if i := indexByte(line, '\n'); i >= 0 {
+				fmt.Println(string(line[:i]))
+				return
+			}
+		case <-deadline:
+			if len(line) > 0 {
+				fmt.Println(string(line))
+			} else {
+				log.Fatal("Timeout waiting for state response")
+			}
+			return
+		}
+	}
+}
+
+func indexByte(b []byte, c byte) int {
+	for i, x := range b {
+		if x == c {
+			return i
+		}
+	}
+	return -1
+}
+
 func cmdScan() {
 	must("enable adapter", adapter.Enable())
 	fmt.Printf("Scanning for %s (Ctrl-C to stop)...\n", deviceName)
@@ -412,11 +467,12 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
   %s fetch <output.bin>    — One-shot snapshot of last 2 KiB of RS485 traffic
   %s stream <output.bin>   — Stream live RS485 traffic to file (Ctrl-C to stop)
+  %s state                 — Print one-line decoded panel state (mode, temps, ...)
   %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
   %s scan                  — Scan and print RSSI for flexitMC3 (Ctrl-C to stop)
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -446,6 +502,8 @@ func main() {
 			usage()
 		}
 		cmdConfirm(os.Args[2])
+	case "state":
+		cmdState()
 	case "list":
 		cmdList()
 	case "scan":

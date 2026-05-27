@@ -1,6 +1,7 @@
 #include "rs485_uart.h"
 #include "rs485_store.h"
 #include "ble_transport.h"
+#include "panel_mirror.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -61,6 +62,7 @@ static void drain_work_handler(struct k_work *work)
     while ((n = ring_buf_get(&rs485_ring, tmp, sizeof(tmp))) > 0) {
         rs485_store_append(tmp, (size_t)n);
         ble_transport_forward_rs485(tmp, (size_t)n);
+        panel_mirror_feed(tmp, (size_t)n);
     }
 }
 
