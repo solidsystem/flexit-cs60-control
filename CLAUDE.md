@@ -25,11 +25,6 @@ The board sits on a **Seeed XIAO-RS485-Expansion-Board**
 The RS485 transceiver is connected (via rj12 connector) to **flexit ci60** control panel, 
 which is connected to **flexit cs60**. 
 
-For documentation on mentioned flexit hardware components, read pdf files in docs/ directory.
-
-This project is very similar to the solution we want to implement:
-- https://github.com/MSkjel/esphome-flexit-modbus-server/tree/main
-
 ## Toolchain
 
 - NCS version: v3.3.0
