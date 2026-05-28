@@ -202,6 +202,18 @@ int rs485_uart_send(const uint8_t *frame, size_t len)
     gpio_pin_set_dt(&de_gpio, 0);
 
     int result = tx_result;
+
+    /* Echo our own TX into the capture stream. The SP3485 has RE# tied to
+     * DE, so the UARTE never sees what we just sent — without this echo, any
+     * BLE-side capture (`ble-client stream`, `ble-client fetch`) reflects
+     * only what we receive, never what we transmit. Skip on TX errors so the
+     * capture doesn't contain phantom frames the wire never carried.
+     */
+    if (result == 0) {
+        rs485_store_append(frame, len);
+        ble_transport_forward_rs485(frame, len);
+    }
+
     k_mutex_unlock(&tx_mutex);
     return result;
 }

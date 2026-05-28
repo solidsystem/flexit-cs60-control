@@ -274,25 +274,30 @@ captures.
 
 ### 6.1 The sweep
 
-The sweep is five frames totalling 45 bytes on the wire:
+The sweep is six frames totalling 58 bytes on the wire (captured
+from `trafficdata/rs485-init-3.bin` with XIAO answering FC04 and
+firmware-side TX echo enabled — see §10):
 
 ```
-  off   bytes                          decoded
-  ───   ────────────────────────────   ─────────────────────────────────
-   +0   FE 04 00 00 00 04 E5 C6        FC04 to addr 0xFE, regs 0..3       (no response)
-   +8   01 04 00 00 00 04 F1 C9        FC04 to addr 0x01, regs 0..3       (no response)
-  +16   02 04 00 00 00 04 F1 FA        FC04 to addr 0x02, regs 0..3
-  +24   02 04 08 00 00 00 00 00 01 02 00 7B E9   ── CI60 responds
+  off   bytes                                    decoded
+  ───   ──────────────────────────────────────   ─────────────────────────────────
+   +0   FE 04 00 00 00 04 E5 C6                  FC04 to 0xFE, regs 0..3  (no response)
+   +8   01 04 00 00 00 04 F1 C9                  FC04 to 0x01, regs 0..3  (no response)
+  +16   02 04 00 00 00 04 F1 FA                  FC04 to 0x02, regs 0..3
+  +24   02 04 08 00 00 00 00 00 01 02 00 7B E9   ── CI60 responds (13 B)
         ^^addr ^^fc ^^bc payload (4 regs = 8 B) CRC
-  +37   03 04 00 00 00 04 F0 2B        FC04 to addr 0x03, regs 0..3       (no response from a stock setup)
-  +45   (sweep ends — CS60 moves on to bulk-init broadcasts §6.2)
+  +37   03 04 00 00 00 04 F0 2B                  FC04 to 0x03, regs 0..3
+  +45   03 04 08 00 00 00 00 00 01 02 00 7F 15   ── XIAO responds (13 B)
+  +58   (sweep ends — CS60 moves on to bulk-init broadcasts §6.2)
 ```
 
-CI60 (at addr 2) answers `[0x0000, 0x0000, 0x0001, 0x0200]`. The
-fourth register being `0x0200` looks suggestive of a firmware /
-protocol version stamp (2.00?); the third being `0x0001` may be a
-device-type code (CI60 = 1?), but neither is confirmed against
-documentation.
+Both CI60 and XIAO answer `[0x0000, 0x0000, 0x0001, 0x0200]` — XIAO
+mirrors CI60's payload exactly (only the CRC differs because of the
+addr byte). The fourth register being `0x0200` looks suggestive of a
+firmware / protocol version stamp (2.00?); the third being `0x0001`
+may be a device-type code (CI60 = 1?), but neither is confirmed
+against documentation. Whether CS60 accepts a distinct device-type
+value (e.g. `[0, 0, 2, 0x200]`) is untested.
 
 The 0xFE probe at the start is unexplained — no slave responds.
 Modbus reserves `0xFE` only loosely (some implementations use it as a
@@ -424,17 +429,32 @@ That splits the work cleanly:
 
 ### Known limitations / open questions
 
-- **FC01 response timing on XIAO** is borderline: the CS60 fires the
-  two FC01 reqs (`start=0x0000` and `start=0x014C`) back-to-back with
-  no idle gap. CI60 fields both in the inter-request slot; XIAO's
-  build-and-send pipeline is slower and its FC01 responses do not
-  consistently appear on the wire (see `SLV_FC01` vs the absence of
-  `03 01 2A` / `03 01 2C` byte patterns in a fresh stream). The
-  mode-change cycle still completes because CS60 periodically issues
-  FC03 against any address it polls, so the coil/FC65 handshake
-  doesn't actually require the FC01 response to be observed by the
-  master. Investigating whether this matters for any *other* CMD_*
-  register is open.
+- **FC01 response timing on XIAO** is degraded by the DMA RX
+  pipeline. CS60 fires the two FC01 reqs (`start=0x0000 qty=332`
+  and `start=0x014C qty=352`) back-to-back with no idle gap. XIAO's
+  DMA RX buffer is only released by either the 1 ms idle timeout
+  (`RX_TIMEOUT_US` in `rs485_uart.c`) — which never fires inside a
+  CS60 burst — or by buffer fill (256 B ≈ 22 ms in). XIAO therefore
+  can't respond in the first poll's response slot consistently.
+  Measured in the boot capture with TX echo enabled:
+
+  | poll                          | hit rate |
+  |-------------------------------|---------:|
+  | first poll  (qty=332, coils 0..331)   | **32 %** |
+  | second poll (qty=352, coils 332..683) | **84 %** |
+  | combined                              | **54 %** |
+
+  CI60 over the same window hits **97 %** on both polls. Every XIAO
+  response that lands does so in the immediate `gap=0 B` slot — no
+  late or misaligned responses. The CS60 does not react to a missed
+  response; it just re-polls on the next cycle, so any raised coil
+  is picked up within 1–2 cycles. The mode-change cycle is therefore
+  unaffected: CS60's FC03 reg-0 read happens with enough time
+  tolerance for XIAO to respond cleanly, and the FC65 ack is a
+  broadcast that needs no response. Lowering `RX_TIMEOUT_US` to
+  ~150 µs and reordering the drain pipeline to feed `flexit_slave`
+  before BLE forwarding would improve the FC01 hit rate, but there
+  is no functional reason to do so at present.
 - **FC04 payload semantics** — see §6.4. XIAO mirrors CI60's exact
   4-register answer. Whether CS60 cares about the contents is
   untested.
@@ -537,3 +557,20 @@ buffered DMA**:
 
 Result: capture rate jumped from ~272 B/s (heavy loss) to ~2 400 B/s
 (matches actual bus volume) and frame coverage from 33.7 % to 96.5 %.
+
+### TX echo in captures
+
+The SP3485 has RE# tied to DE, so while XIAO drives the line during
+its own transmission the receiver is electrically disabled — bytes
+XIAO puts on the wire are not echoed back into its DMA buffers.
+Without intervention, any capture taken via `ble-client stream` /
+`fetch` would only reflect what XIAO *received*, never what it
+*transmitted*, leaving its own FC01/FC03/FC04/FC65 responses
+invisible.
+
+`rs485_uart_send()` therefore feeds the just-transmitted frame back
+into `rs485_store_append()` and `ble_transport_forward_rs485()` on
+successful TX. Captures from this point on contain the full bus
+view — both directions — and let us measure response timing
+directly (see §7 known limitations for the resulting FC01 hit-rate
+analysis).

@@ -370,32 +370,16 @@ static size_t try_decode_at_front(void)
  * Public API
  * ---------------------------------------------------------------------------
  */
-/* Default value pre-armed at boot. Matches the panel's current operating
- * mode (Normal) so that — if the CS60 happens to poll us during its own
- * boot enumeration and runs the full coil/FC03/FC65 cycle — the resulting
- * FC65 write is a no-op against the present state.
- *
- * Rationale: when the user power-cycles the CS60 the XIAO loses power too
- * (shared RJ12 supply), so any "pending" command in RAM is wiped. By
- * pre-arming coil 0 we give the freshly-booted CS60 something to discover
- * the very first time it might probe slave addresses.
- */
-#define FLEXIT_SLAVE_BOOT_MODE 2u
-
 int flexit_slave_init(void)
 {
     k_mutex_lock(&state_mutex, K_FOREVER);
     memset(&state, 0, sizeof(state));
-    state.regs[FLEXIT_SLAVE_CMD_MODE_ADDR]        = FLEXIT_SLAVE_BOOT_MODE;
-    state.coils[FLEXIT_SLAVE_CMD_MODE_ADDR >> 3] |=
-        (uint8_t)(1u << (FLEXIT_SLAVE_CMD_MODE_ADDR & 7));
-    state.pending_mode    = FLEXIT_SLAVE_BOOT_MODE;
+    state.pending_mode    = SENTINEL_NONE;
     state.last_acked_mode = SENTINEL_NONE;
     k_mutex_unlock(&state_mutex);
     accum_len = 0;
-    printk("flexit_slave: addr=%u, %u coils / %u regs, boot-armed mode=%u\n",
-           FLEXIT_SLAVE_ADDR, FLEXIT_SLAVE_COIL_COUNT, FLEXIT_SLAVE_REG_COUNT,
-           FLEXIT_SLAVE_BOOT_MODE);
+    printk("flexit_slave: addr=%u, %u coils / %u regs\n",
+           FLEXIT_SLAVE_ADDR, FLEXIT_SLAVE_COIL_COUNT, FLEXIT_SLAVE_REG_COUNT);
     return 0;
 }
 
