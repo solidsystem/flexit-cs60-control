@@ -6,7 +6,15 @@ The project goal is to create a smarthouse device that allows monitoring and con
 the flexit ventilation system. The smarthouse controller will connect to xiao_ble with
 either bluetooth or zigbee (not decided which to implement yet).
 
+
 ## hardware info
+
+**Device names**: 
+ - CU60, CE60 and CS60 are all names for the flexit ventilation control unit.
+ - CI60 is the name of the connected control panel 
+ - CI600 is the name of another control panel model (not connected here)
+ - CI66 is the name of a modbus adapter (not connected here)
+ - XIAO is the smarthouse device in development
 
 Zephyr/nRF Connect SDK application for Seeed XIAO BLE (nRF52840) with MCUboot
 (https://wiki.seeedstudio.com/XIAO_BLE/).
@@ -111,6 +119,18 @@ go build -o ble-client .
 
 # Continuous capture: stream live RS485 bytes to file (Ctrl-C to stop)
 ./ble-client stream rs485_live.bin
+
+# Print decoded panel state (MODE, temps, percentages, runtime counters)
+./ble-client state                  # compact one-line-per-field
+./ble-client state --human-friendly # verbose multiline
+
+# Queue a CMD_MODE change via the XIAO's Modbus slave
+#   0=Stop, 1=Min, 2=Normal, 3=Max
+# The XIAO raises coil 0 / reg 0; CS60 picks it up on its next FC01 poll,
+# reads reg 0 via FC03, and broadcasts FC65 to ack — same cycle as a
+# physical panel press. Requires the XIAO to be at a CS60-registered
+# slave address (i.e. present and responding when CS60 last booted).
+./ble-client mode 1
 
 # Scan and print RSSI (useful to check signal before flashing)
 ./ble-client scan
