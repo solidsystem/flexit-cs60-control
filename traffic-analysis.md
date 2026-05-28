@@ -12,16 +12,17 @@ frame on the bus was therefore corrupted in flight. With DMA, long
 frames now arrive intact and **96–97 %** of captured bytes form valid
 Modbus CRC frames.
 
-Two captures analyzed:
+Three captures analyzed:
 
 | File                                       | Size      | Duration | Byte rate | Notes |
 |--------------------------------------------|-----------|----------|-----------|-------|
-| `trafficdata/rs485-idle.bin`               |  41 770 B | ~18 s    | 2 320 B/s | Idle baseline — no panel interaction. |
-| `trafficdata/rs485-panel-up-down.bin`      | 130 260 B | ~54 s    | 2 394 B/s | Speed setting changed via panel: min → medium → max → medium → min, a few seconds between presses. |
+| `trafficdata/rs485-idle.bin`               |  41 770 B | ~18 s    | 2 320 B/s | Idle baseline — no panel interaction. CI60 only. |
+| `trafficdata/rs485-panel-up-down.bin`      | 130 260 B | ~54 s    | 2 394 B/s | Speed setting changed via panel: min → medium → max → medium → min, a few seconds between presses. CI60 only. |
+| `trafficdata/rs485-init.bin`               | varies    | varies   | —         | CS60 cold-boot: XIAO already running and listening on the bus, then CS60 (+ CI60) powered on while streaming. Contains the FC04 enumeration sweep, §6. |
 
-Both captures show the same byte rate, which corresponds to ~16–17 %
-bus utilisation at 115200 baud. The bus is busy — the CS60 polls
-continuously at ~8 cycles/s.
+The idle and panel captures show ~16–17 % bus utilisation at 115200
+baud during steady-state polling (~8 cycles/s). The init capture covers
+the much rarer boot transient (§6).
 
 ---
 
@@ -30,13 +31,22 @@ continuously at ~8 cycles/s.
 | Parameter | Value | How verified |
 |-----------|-------|-------------|
 | Baud rate | **115200 / 8N1** | Frames decode cleanly. Matches the ESPHome Flexit-Modbus-Server reference. |
-| Wiring    | Half-duplex RS485, DE/RE held low (receive-only) | We see master and slave traffic on the same line. |
+| Wiring    | Half-duplex RS485, DE/RE held low (receive-only on the sniffer; the slave side now also drives TX) | We see master and slave traffic on the same line. |
 | Bus master | Flexit **CS60** | All polling traffic originates from one party. |
-| Polled slave | Flexit **CI60 panel @ addr 2** | All addr-2 traffic; no other unicast addresses ever appear. |
+| Polled slaves | Set chosen at boot via FC04 enumeration (§6). Currently observed: **CI60 panel @ addr 2** + **XIAO @ addr 3** | Both addresses receive FC01 polls every cycle. |
 | Broadcasts | addr `0x00` | All FC06, FC10 and FC65 use addr 0 (Modbus broadcast). |
 
-The CS60 is the only master. The CI60 panel only responds — never
-initiates. Broadcasts are not echoed by slaves.
+The CS60 is the only master. Slaves only respond — never initiate
+unsolicited traffic. Broadcasts are not echoed by slaves.
+
+> **Slave set is fixed at boot.** The CS60 sweeps addresses 0x01..0x03
+> (plus 0xFE) with FC04 ReadInputRegs once at power-up; whoever
+> answers becomes a polled slave for the rest of the session. Flipping
+> the CI60 panel's DIP-switch from off to on moves it from addr 2 to
+> addr 3, but only takes effect after the next CS60 power-cycle.
+> Adding a second slave (e.g. XIAO at 3 while CI60 stays at 2) also
+> requires a CS60 power-cycle to enrol — runtime additions are
+> invisible. See §6 for the full enumeration sequence.
 
 > The CS60 *intentionally ignores* Modbus-RTU inter-frame timing — see
 > `setup()` in MSkjel's `flexit_modbus_server.cpp`:
@@ -47,10 +57,10 @@ initiates. Broadcasts are not echoed by slaves.
 
 ---
 
-## 2. Polling cadence
+## 2. Polling cadence (steady state)
 
 ```
-~120 ms cycle, repeated continuously:
+~120 ms cycle, repeated continuously (per registered slave):
   ┌──────────────────────────────────────────────────────────┐
   │  FC10 broadcast (179 B)         status block 0x00BE+85   │
   │  FC01 req A (8 B)               read coils 0..331         │
@@ -62,10 +72,17 @@ initiates. Broadcasts are not echoed by slaves.
   ≈ 290 bytes / cycle ⇒ ~8 cycles / s at 2 400 B/s
 ```
 
-In the panel capture the CS60 issues **450 FC10 broadcasts in 54 s**
-(8.3 broadcasts / s) and **1 626 FC01 requests** (30 req/s = 8.3
-request *pairs* / s — matches). FC06 broadcasts run at ~3.7 / s. So
-every fan-speed change carries through to slaves within 120 ms.
+In the panel capture (single registered slave = CI60) the CS60 issues
+**450 FC10 broadcasts in 54 s** (8.3 broadcasts / s) and **1 626 FC01
+requests** (30 req/s = 8.3 request *pairs* / s — matches). FC06
+broadcasts run at ~3.7 / s. Every fan-speed change carries through to
+slaves within 120 ms.
+
+When two slaves are registered (e.g. CI60 + XIAO), the CS60 fires the
+FC01 pair at each registered address back-to-back with no idle gap
+between them — so each slave gets the same ~8 polls / s, total bus
+load roughly doubles for the FC01 traffic. The FC10 broadcast cadence
+does **not** double; it stays at ~8 / s regardless of slave count.
 
 ---
 
@@ -75,39 +92,42 @@ Cross-referenced against MSkjel's ESPHome implementation, which
 explicitly disables FC04 (ReadInputRegs), FC05 (WriteSingleCoil),
 FC0F (WriteMultipleCoils) and FC11 (ReportSlaveID) via
 `MODBUS_DISABLE_*` macros. With the improved receive path we now see
-**every** code the CS60 actually uses.
+**every** code the CS60 actually uses — including one (FC04) that
+ESPHome disables but that turns out to be required for slave
+registration; see §6.
 
-A length-ascending CRC scan over both captures finds the following
-function codes — and **only** these:
+A length-ascending CRC scan over the steady-state captures finds the
+following function codes — and **only** these:
 
 | FC | Idle capture | Panel capture |
 |----|-------------:|--------------:|
-| `0x01` ReadCoils | 514 | 1 626 |
-| `0x03` ReadHoldingRegs | 0 | 6 |
-| `0x06` WriteSingleReg | 67 | 203 |
-| `0x10` WriteMultipleRegs | 146 | 450 |
-| `0x65` Flexit reset | 0 | 3 |
-| `0x00` (false-positive CRC coincidences) | 0 | 3 |
+| `0x01` ReadCoils                                | 514 | 1 626 |
+| `0x03` ReadHoldingRegs                          |   0 |     6 |
+| `0x04` ReadInputRegs *(boot only — see §6)*     |   0 |     0 |
+| `0x06` WriteSingleReg                           |  67 |   203 |
+| `0x10` WriteMultipleRegs                        | 146 |   450 |
+| `0x65` Flexit reset                             |   0 |     3 |
+| `0x00` (false-positive CRC coincidences)        |   0 |     3 |
 
-So **FC04, FC05, FC0F and FC11 are confirmed absent in both
-captures** — the CS60 never issues them, matching what the ESPHome
-implementation expects. FC02 (ReadDiscreteInputs) and FC17
-(ReadWriteMultipleRegs) are also absent, even though ESPHome doesn't
-explicitly disable those — the CS60 just doesn't use them.
+So **FC05, FC0F and FC11 are confirmed absent** during steady-state —
+the CS60 never issues them. FC04 is also absent from steady-state but
+is the workhorse of the boot-time enumeration (§6). FC02
+(ReadDiscreteInputs) and FC17 (ReadWriteMultipleRegs) are absent too,
+even though ESPHome doesn't explicitly disable those — the CS60 just
+doesn't use them.
 
 The three `fc=0x00` hits in the panel capture are CRC coincidences
 inside corrupted long frames (lengths 106, 159, 195 — not matching
-any real Modbus frame shape). They appear because the length-ascending
-scanner finds the first valid CRC at *any* length, including random
-matches inside payload data. They are not real frames.
+any real Modbus frame shape).
 
 | FC | Name | Direction | Seen in | What it carries |
 |----|------|-----------|---------|-----------------|
-| `0x01` | ReadCoils | CS60 → slave (addr 2) | both | Polls the slave's "pending command" coil bitmap. Two requests per cycle cover coils 0–683. Responses are 332-coil (47 B) and 352-coil (49 B). The bitmap is **all zeros** during idle, and we see exactly **one bit set** (coil 0) when the panel raises a command. |
-| `0x03` | ReadHoldingRegs | CS60 → slave (addr 2) | panel only | Single-register reads, only issued *as a follow-up* after a slave has raised a coil. The request is 8 B (`02 03 00 00 00 01 84 39` = read 1 reg at addr 0); the response is 7 B (`02 03 02 NN NN CC CC`). We see this exactly **3 times in the panel capture**, **0 times during idle**. |
-| `0x06` | WriteSingleReg | CS60 → broadcast | both | Runtime counters (operating-minutes per mode + filter + rotor). 67 frames in 18 s idle, 203 in 54 s panel. |
-| `0x10` | WriteMultipleRegs | CS60 → broadcast | both | Bulk status block: 85 registers at `0x00BE`, 179-byte frame. **This is the CS60's "here's everything I know" broadcast** — pushed every ~120 ms whether or not anything changed. |
-| `0x65` | Flexit proprietary "reset coil+register" | CS60 → broadcast | panel only | 8-byte frame `00 65 AH AL VH VL CC CC`. ESPHome handles it as `setHoldingRegister(addr, value); setCoil(addr, 0);` — clears the coil that the slave set, while stamping the register with the broadcast value. We see this exactly **3 times in the panel capture**, **0 times during idle** — once per command cycle, always paired with an FC03 read. |
+| `0x01` | ReadCoils | CS60 → slave | all | Polls the slave's "pending command" coil bitmap. Two requests per cycle cover coils 0–683. Responses are 332-coil (47 B) and 352-coil (49 B). The bitmap is **all zeros** until a slave raises a command flag (coil 0 = CMD_MODE in the captured cases). |
+| `0x03` | ReadHoldingRegs | CS60 → slave | panel + init | Single-register reads, only issued *as a follow-up* after a slave has raised a coil. The request is 8 B (`02 03 00 00 00 01 84 39` = read 1 reg at addr 0); the response is 7 B (`02 03 02 NN NN CC CC`). |
+| `0x04` | ReadInputRegs | CS60 → slave (probe) | **init only** | Boot-time enumeration sweep — 8 B request asking for input regs 0..3. Used to discover which addresses host a slave. See §6. |
+| `0x06` | WriteSingleReg | CS60 → broadcast | all | Runtime counters (operating-minutes per mode + filter + rotor). 67 frames in 18 s idle, 203 in 54 s panel. |
+| `0x10` | WriteMultipleRegs | CS60 → broadcast | all | Two distinct shapes: (a) the **status block** at `0x00BE` (85 regs, 179 B, every ~120 ms), and (b) a **bulk-init burst** that appears only at boot — four chained writes covering regs `0x0000..0x015F`, see §6. |
+| `0x65` | Flexit proprietary "reset coil+register" | CS60 → broadcast | panel + init | 8-byte frame `00 65 AH AL VH VL CC CC`. ESPHome handles it as `setHoldingRegister(addr, value); setCoil(addr, 0);` — clears the coil that the slave set, while stamping the register with the broadcast value. Once per command cycle, always paired with an FC03 read. |
 
 ---
 
@@ -185,9 +205,7 @@ every status broadcast — every transition is therefore visible within
 ```
 
 Four MODE transitions for four button presses, with constant
-fan-speed mapping **Min=50 % / Normal=69 % / Max=100 %**. Both `MODE`
-and `PCT_SUPPLY_FAN` track the speed setting — the latter is the
-configured fan setpoint table that the CS60 looks up per mode.
+fan-speed mapping **Min=50 % / Normal=69 % / Max=100 %**.
 
 ### 5.2 Full command cycle (per button press)
 
@@ -242,123 +260,198 @@ holding-register / coil index being acked — in this case `CMD_MODE`.
 Each non-zero panel FC01 response in the capture has the **same**
 bitmap: byte 0 = `0x01`, all other bytes zero. That maps to **coil 0
 only** — the `CMD_MODE` flag. No other panel-driven commands fired in
-this capture (no temperature change, no timer button, etc.).
+this capture.
 
 ---
 
-## 6. Implications for the project goal
+## 6. Boot enumeration (`rs485-init.bin`)
+
+The init capture was taken with the XIAO already streaming and the
+CS60 + CI60 powered off, then powered on. The first thing CS60 emits
+after boot is a single enumeration sweep using **FC04 ReadInputRegs**
+— the *only* place this function code appears anywhere in our
+captures.
+
+### 6.1 The sweep
+
+The sweep is five frames totalling 45 bytes on the wire:
+
+```
+  off   bytes                          decoded
+  ───   ────────────────────────────   ─────────────────────────────────
+   +0   FE 04 00 00 00 04 E5 C6        FC04 to addr 0xFE, regs 0..3       (no response)
+   +8   01 04 00 00 00 04 F1 C9        FC04 to addr 0x01, regs 0..3       (no response)
+  +16   02 04 00 00 00 04 F1 FA        FC04 to addr 0x02, regs 0..3
+  +24   02 04 08 00 00 00 00 00 01 02 00 7B E9   ── CI60 responds
+        ^^addr ^^fc ^^bc payload (4 regs = 8 B) CRC
+  +37   03 04 00 00 00 04 F0 2B        FC04 to addr 0x03, regs 0..3       (no response from a stock setup)
+  +45   (sweep ends — CS60 moves on to bulk-init broadcasts §6.2)
+```
+
+CI60 (at addr 2) answers `[0x0000, 0x0000, 0x0001, 0x0200]`. The
+fourth register being `0x0200` looks suggestive of a firmware /
+protocol version stamp (2.00?); the third being `0x0001` may be a
+device-type code (CI60 = 1?), but neither is confirmed against
+documentation.
+
+The 0xFE probe at the start is unexplained — no slave responds.
+Modbus reserves `0xFE` only loosely (some implementations use it as a
+"any-slave" or "controller-self" address); here it's most likely a
+no-op CS60 prologue.
+
+After the 0x03 probe, the sweep terminates. Whether CS60 stops because
+it polled a fixed range (0x01..0x03) or because it found at least one
+responder and the first subsequent silence, is undetermined — the
+captured sweep doesn't disambiguate.
+
+### 6.2 Bulk register broadcast
+
+Immediately after the sweep, CS60 broadcasts its full register state
+to the bus via **four chained FC10 broadcasts**:
+
+| Frame length | start | qty | covers regs        |
+|-------------:|------:|----:|--------------------|
+|  255 B       | 0x0000 | 123 | 0x0000..0x007A   |
+|  255 B       | 0x007B | 123 | 0x007B..0x00F5   |
+|  181 B       | 0x00F6 |  86 | 0x00F6..0x014B   |
+|   49 B       | 0x014C |  20 | 0x014C..0x015F   |
+
+Together they cover **regs 0x0000 through 0x015F** — exactly the
+address range CS60 will subsequently poll (FC01 read-coil pairs at
+`start=0x0000 qty=332` and `start=0x014C qty=352`). It functions as a
+"sync to slaves" pulse: any newly-enrolled slave gets the full
+current state pushed into its register/coil tables before steady-state
+polling begins. ESPHome's `setHoldingRegister(addr,value)` /
+`setCoil(addr,bool)` callbacks handle these the same way they handle
+the steady-state FC10 status block.
+
+### 6.3 Resumption of steady-state polling
+
+The very next frame after the four bulk-init broadcasts is the
+canonical FC10 status block at `0x00BE qty=85`, followed by FC01
+pairs against every address that answered FC04. With CI60 at 2 and
+XIAO at 3 (XIAO answering FC04 since the firmware change of
+`src/flexit_slave.c`), both slot 2 *and* slot 3 receive the full
+FC01 pair every cycle.
+
+### 6.4 Implications
+
+- **Slave enrolment is FC04-gated**. A slave that doesn't answer the
+  FC04 probe at boot will be silently ignored for the rest of the
+  CS60 session — no FC01 polls, no FC03 reads, no FC65 acks.
+  XIAO therefore needs an FC04 handler at minimum 4 input registers
+  (regs 0..3); see `flexit_slave.c::build_fc04_response`.
+- **Enrolment only happens at CS60 boot**. Plugging in a new slave
+  at runtime is invisible — the CS60 has to be power-cycled (with
+  the XIAO already running and reachable on the bus) for the new
+  slave to be picked up.
+- **Whether the FC04 response payload is checked is unknown**. XIAO
+  currently mirrors CI60's `[0, 0, 1, 0x200]` exactly and is accepted.
+  Whether a distinct device-type would also be accepted, or whether
+  CS60 demands `[0, 0, 1, 0x200]` specifically, is untested.
+
+---
+
+## 7. Implications for the project goal
 
 The XIAO is a **smarthouse bridge**: it sits on the Flexit panel bus
 on one side and exposes the ventilation system to a home-automation
-controller on the other side, via BLE or Zigbee (transport not yet
-decided).
+controller on the other side, via BLE or Zigbee (transport choice
+still open; current implementation uses BLE NUS).
 
 That splits the work cleanly:
 
 - **Panel-bus side** — speak the proprietary Flexit Modbus dialect
   documented above. *Read* via passive sniffing of FC10 broadcasts;
-  *write* via the slave + coil + FC65 cycle observed in §5.2.
+  *write* via the slave + coil + FC65 cycle observed in §5.2; *get
+  registered* via the FC04 handshake in §6.
 - **Smarthouse side** — expose the mirrored state and a small set
-  of commands over BLE or Zigbee. The interface design is out of
-  scope for this document.
+  of commands over BLE. See the `BLE client` section of `CLAUDE.md`.
 
 ### Confirmed by direct observation
 
 1. **Read-only monitoring needs no Modbus slave.** The FC10 status
    broadcast at `0x00BE` (85 regs, every ~120 ms) carries MODE, all
    four temperature inputs, all four percentage outputs and the
-   runtime counters. Just decoding the broadcast stream is enough
-   for everything the smarthouse needs to *display*.
+   runtime counters. Decoding the broadcast stream is enough for
+   everything the smarthouse needs to *display*.
 
-2. **Writing back to the system needs a Modbus slave.** Commands
-   from outside the panel only enter the system via the coil + FC65
-   handshake (§5.2). To dim/boost the fan from the smarthouse, the
-   XIAO must register as a Modbus slave that the CS60 polls.
+2. **Writing back to the system needs a registered Modbus slave.**
+   Commands from outside the panel only enter the system via the
+   coil + FC65 handshake (§5.2). The CS60 will only ever poll a slave
+   it enrolled at boot (§6), so the slave must answer FC04 *and* be
+   present on the bus when CS60 powers up.
 
-3. **The CS60 only polls/acks an active slave.** It reacts to coil
-   flags — if no slave raises a coil, FC03 and FC65 never appear.
-   So a slave that never asserts a coil is effectively invisible to
-   the CS60. For pure read-only operation, no slave is needed at
-   all.
+3. **The CS60 reacts to coil flags.** If no slave raises a coil, FC03
+   and FC65 never appear. A registered slave that never asserts a
+   coil is benign — it just gets polled with FC01 and answers
+   all-zero bitmaps.
 
 4. **The complete command cycle** for a slave-initiated command is:
    1. Slave sets `coil[X] = 1`, `holding_reg[X] = value`.
    2. CS60 sees the coil on its next FC01 ReadCoils poll (~120 ms).
    3. CS60 issues FC03 `read 1 reg at addr X`, slave responds with
       the value.
-   4. CS60 broadcasts FC65 `(addr=X, value=value)`. The slave must
-      treat this as `setHoldingRegister(X, value); setCoil(X, 0);`.
+   4. CS60 broadcasts FC65 `(addr=X, value=value)`. The slave treats
+      this as `setHoldingRegister(X, value); setCoil(X, 0);`.
    5. CS60 broadcasts FC10 status block reflecting the new state.
 
-5. **Slave addressing**: the panel sits at addr `2`. Any address ≠ 2
-   (and ≠ 0 broadcast) is free. ESPHome defaults to `1`; `3` is
-   another reasonable choice.
+5. **Slave addressing**: addr `2` is the CI60 panel by default.
+   XIAO sits at addr `3` (`FLEXIT_SLAVE_ADDR` in `flexit_slave.h`).
+   Both are simultaneously polled in the current setup. Addr `1` is
+   probed by the boot sweep but currently unoccupied.
 
 6. **Sensor-not-present sentinel**: extract-air and return-water
    sensors absent from this installation produce 16-bit signed values
    that decode as -187.5 °C, -250.0 °C, etc. These are not real
-   readings; they're sentinel codes. The smarthouse side should
-   surface them as "sensor not present" rather than passing the raw
-   degree value through.
+   readings; they're sentinel codes. The smarthouse side surfaces
+   them as "sensor not present" (see `panel_mirror.c`).
 
 7. **Fan-speed table**: in this installation, Min=50 %, Normal=69 %,
    Max=100 %. These are the per-mode setpoints stored in `CMD_*`
    registers (`0x02/0x03/0x04` for supply fan, `0x07/0x08/0x09` for
-   extract fan) — i.e. they're configurable on the panel side.
+   extract fan) — configurable on the panel side.
 
-### Open / still to verify
+### Status of the implementation
 
-- Whether the CS60 enumerates slaves only at boot, or also at
-  runtime — neither capture covered a CS60 power cycle. ESPHome
-  defaults to `setup_priority::BUS` to be ready early; we should do
-  the same.
-- The semantics of `REG_UNKNOWN_1` (`0xC0`) and `REG_UNKNOWN_2`
-  (`0xC1`). `UNK_1` is `0x0DA6` (3494) in both captures and doesn't
-  appear to change with mode — likely an uptime counter on a slower
-  clock. `UNK_2` is consistently `0x0000`.
-- The 50 or so unnamed registers between `0x00CB` and `0x00FF` that
-  the FC10 broadcast also carries. Their values are mostly stable
-  zeros plus a few constants (`0xDD75`, `0x001A`, etc.); none changed
-  during the panel-press capture.
+- **Phase 1 — passive monitoring**: done. `src/panel_mirror.c`
+  decodes the FC10 status block live and exposes the state over BLE
+  (`ble-client state`).
+- **Phase 2 — Modbus slave for writes**: done.
+  `src/flexit_slave.c` implements FC01, FC03, FC04 (boot), and FC65;
+  XIAO is registered at addr 3 after a CS60 power-cycle and the
+  full command cycle (`ble-client mode N`) works end-to-end.
 
-### Required next steps on the panel-bus side
+### Known limitations / open questions
 
-1. **Phase 1 — passive monitoring.** Parse the FC10 broadcast into a
-   local mirror of the panel state (MODE, four temperatures, four
-   percentages, the runtime counters) and surface a few sentinel
-   constants so the smarthouse layer can show "sensor n/a". This is
-   strictly read-only — no slave registration, no risk of disturbing
-   the existing CS60↔panel conversation.
-
-2. **Phase 2 — Modbus slave for writes.** Register at addr `3`
-   covering the five function codes the CS60 actually uses:
-   - **FC01 ReadCoils** — keep a coil table of at least the
-     `CMD_*` addresses we want to push (start with coil 0 = CMD_MODE).
-   - **FC03 ReadHoldingRegs** — respond to single-register reads
-     against any address we've armed via coil.
-   - **FC06 / FC10** broadcasts from addr 0 — already handled by
-     phase 1 (passive mirror); just keep doing it.
-   - **FC65** broadcasts — clear the matching coil and stamp the
-     matching register with the carried value (closes the cycle the
-     slave opened).
-
-   Per ESPHome, disable FC04, FC05, FC0F, FC11.
-
-3. **Coil ↔ register address pairing.** Every command we want to
-   issue needs storage in *both* tables at the same address. The
-   coil is the "fresh" flag; the register holds the value.
-
-4. **Pick command slots from the ESPHome `HoldingRegisterIndex`
-   enum.** Useful targets: `0x00` (CMD_MODE), `0x02..0x09` (fan
-   setpoints), `0x0C..0x0E` (temperature setpoints), `0x13A..0x13C`
-   (timer / clear alarms), `0x116` (clear filter alarm). For a first
-   write test, mirroring the panel's behaviour with `CMD_MODE` (coil
-   0 + reg 0) is the cleanest starting point — the captured cycle in
-   §5.2 is exactly what our slave needs to emit.
+- **FC01 response timing on XIAO** is borderline: the CS60 fires the
+  two FC01 reqs (`start=0x0000` and `start=0x014C`) back-to-back with
+  no idle gap. CI60 fields both in the inter-request slot; XIAO's
+  build-and-send pipeline is slower and its FC01 responses do not
+  consistently appear on the wire (see `SLV_FC01` vs the absence of
+  `03 01 2A` / `03 01 2C` byte patterns in a fresh stream). The
+  mode-change cycle still completes because CS60 periodically issues
+  FC03 against any address it polls, so the coil/FC65 handshake
+  doesn't actually require the FC01 response to be observed by the
+  master. Investigating whether this matters for any *other* CMD_*
+  register is open.
+- **FC04 payload semantics** — see §6.4. XIAO mirrors CI60's exact
+  4-register answer. Whether CS60 cares about the contents is
+  untested.
+- **Sweep boundary** — see §6.1. Whether CS60 always probes
+  `{0xFE, 0x01, 0x02, 0x03}` or sweeps further is undetermined.
+- **The 50 or so unnamed registers** between `0x00CB` and `0x0103`
+  that the FC10 status block carries. Their values are mostly
+  stable zeros plus a few constants (`0xDD75`, `0x001A`, etc.);
+  none changed during the panel-press capture.
+- **`REG_UNKNOWN_1` (`0xC0`)** is `0x0DA6` (3494) in the idle/panel
+  captures, varies in init (`0x0DBB` and similar). Likely an uptime
+  / wall-clock counter; not yet decoded. `UNK_2` is consistently
+  `0x0000`.
 
 ---
 
-## 7. Cross-check against the ESPHome reference
+## 8. Cross-check against the ESPHome reference
 
 Source files mirrored locally to `/tmp/esphome_ref/` from
 `MSkjel/esphome-flexit-modbus-server` (`flexit_modbus_server.cpp` and
@@ -369,24 +462,29 @@ Source files mirrored locally to `/tmp/esphome_ref/` from
 | Claim in ESPHome source | Confirmed by capture |
 |-------------------------|---------------------|
 | CS60 ignores Modbus RTU inter-frame timing | back-to-back frames, no idle gap |
-| FC01 "big read" against the slave | exactly the two-request pair to addr 2 |
+| FC01 "big read" against the slave | exactly the two-request pair to each registered addr |
 | FC03 = single-register reads only | every FC03 response is 7 B (1 reg) |
 | FC65 = proprietary reset that ACKs slave commands | 3/3 captured presses end with an FC65 broadcast |
 | Coil X and holding reg X are paired | panel raises coil 0; CS60 reads reg 0; FC65 carries (addr=0, value=N) |
-| Function-code surface = {01, 03, 06, 10, 65}; FC04/05/0F/11 disabled | only these five appear in either capture; the four disabled codes are absent |
 | Status block at `0x00BE`, MODE at `0x00BF`, sensors at `0x00C3..0x00C6` | FC10 broadcasts decode exactly that layout |
-| 4 modes: Stop=0, Min=1, Normal=2, Max=3 | only 1/2/3 observed (panel never went to Stop in this run) — fan PCTs 50/69/100 % cross-check |
+| 4 modes: Stop=0, Min=1, Normal=2, Max=3 | only 1/2/3 observed in user-driven presses — fan PCTs 50/69/100 % cross-check |
 
-### Things the capture clarifies vs. the source
+### Where the captures diverge from the source
 
-- The **status broadcast is much faster than the source suggests** —
-  the ESPHome implementation processes whatever the CS60 sends; it
-  doesn't document a cadence. We measured ~8 broadcasts/s = one every
-  120 ms.
-- The CS60's `start=0x0200` field in some "FC03 response" frames is
-  a red herring — those are CRC coincidences inside other frame
-  payloads, not real FC03 requests. Real FC03 requests use
-  `start=0x0000 count=1`.
+- **ESPHome disables FC04**, but the CS60 *requires* FC04 to enrol a
+  slave at boot (§6). A pure-ESPHome firmware would never get
+  registered if it weren't already at an address the CS60 happens to
+  remember from a previous boot — but since CS60 also has no NV slot
+  memory (verified by moving CI60's DIP switch and rebooting CS60),
+  this is not actually possible. The ESPHome reference therefore
+  only works if the CS60 sweep range happens to include the slave's
+  address *and* the slave somehow responds to it. With our firmware
+  implementing FC04 explicitly, this dependency is now visible and
+  reliable.
+- The **status broadcast cadence is much faster than the source
+  suggests** — the ESPHome implementation processes whatever the CS60
+  sends; it doesn't document a cadence. We measured ~8 broadcasts/s
+  = one every 120 ms.
 
 ### Things still not in the source
 
@@ -397,29 +495,25 @@ Source files mirrored locally to `/tmp/esphome_ref/` from
   ESPHome treats raw values as `int16_t / 10`, so it would just show
   -125 °C in the UI; the CS60 must have a separate flag we haven't
   located.
+- The boot enumeration sequence (§6) — the source has no slave-
+  registration logic at all.
 
 ---
 
-## 8. Tooling used
+## 9. Tooling used
 
 - `tools/ble-client stream <file>` — streams live RS485 bytes to
   disk over BLE NUS.
-- `/tmp/analyze_modbus.py` — short-first CRC scan, frame stats,
-  register decode using ESPHome's name table.
-- `/tmp/fast_analyze.py` — length-prioritised CRC scan with table-
-  driven CRC for faster analysis of large captures; extracts a
-  chronological MODE timeline from FC10 broadcasts.
-- `/tmp/show_cycle.py` — locates the four "interesting" event
-  classes (FC01 non-zero bitmap, FC03 req+resp, FC10 MODE change,
-  FC65 broadcast) and prints them with timestamps so the full
-  per-press cycle is one screen.
-
-All Python helpers re-implement the Modbus CRC-16 (poly 0xA001, init
-0xFFFF), so they're standalone — no external dependencies.
+- `tools/ble-client state [--human-friendly]` — reports decoded
+  panel state and slave counters (FC01/FC03/FC04/FC65) over BLE.
+- Throwaway Python helpers in `/tmp/` for offline frame analysis
+  (length-prioritised CRC scan, frame stats, MODE timeline,
+  enumeration window inspection). All implement Modbus CRC-16 (poly
+  0xA001, init 0xFFFF) directly — no external dependencies.
 
 ---
 
-## 9. Receive-path notes (for posterity)
+## 10. Receive-path notes (for posterity)
 
 The first attempts at this analysis used the Zephyr **interrupt-
 driven** UART API. That couldn't keep up: long frames (FC10

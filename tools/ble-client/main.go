@@ -422,6 +422,56 @@ func cmdState(humanFriendly bool) {
 	}
 }
 
+// cmdMode connects, sends "mode N" over NUS RX, prints the one-line ack
+// the firmware sends back on NUS TX, then disconnects. N must be 0..3.
+func cmdMode(modeArg string) {
+	mode, err := strconv.Atoi(modeArg)
+	if err != nil || mode < 0 || mode > 3 {
+		log.Fatalf("mode: bad arg %q — must be 0, 1, 2 or 3", modeArg)
+	}
+
+	sysbus, err := dbus.SystemBus()
+	must("system dbus", err)
+	registerPairingAgent(sysbus)
+
+	device := connectBLE()
+	defer device.Disconnect()
+
+	txChar, rxChar := openNUS(device)
+
+	notifyCh := make(chan []byte, 16)
+	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
+		b := make([]byte, len(buf))
+		copy(b, buf)
+		notifyCh <- b
+	}))
+
+	cmd := fmt.Sprintf("mode %d", mode)
+	fmt.Printf("Sending %q...\n", cmd)
+	_, werr := rxChar.WriteWithoutResponse([]byte(cmd))
+	must("write mode", werr)
+
+	var line []byte
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case chunk := <-notifyCh:
+			line = append(line, chunk...)
+			if i := indexByte(line, '\n'); i >= 0 {
+				fmt.Print(string(line[:i+1]))
+				return
+			}
+		case <-deadline:
+			if len(line) > 0 {
+				fmt.Println(strings.TrimRight(string(line), "\r\n"))
+			} else {
+				log.Fatal("Timeout waiting for mode ack")
+			}
+			return
+		}
+	}
+}
+
 // formatStateHuman parses the compact one-line firmware state string and
 // prints a verbose, multiline human-readable report to stdout.
 //
@@ -487,6 +537,52 @@ func formatStateHuman(line string) {
 	fmt.Printf("    Heating:         %s %%\n", kv["PCT_HEAT"])
 	fmt.Printf("    Cooling:         %s %%\n", kv["PCT_COOL"])
 	fmt.Println()
+
+	// --- Pending command (Modbus slave cycle) ---
+	if _, ok := kv["MODE_QUEUED"]; ok {
+		fmt.Println("  Pending command")
+		queued := kv["MODE_QUEUED"]
+		if queued == "none" {
+			fmt.Println("    Queued:          —")
+		} else if name, ok := modeNames[queued]; ok {
+			fmt.Printf("    Queued:          %s — %s\n", queued, name)
+		} else {
+			fmt.Printf("    Queued:          %s\n", queued)
+		}
+
+		acked := kv["MODE_ACKED"]
+		if acked == "" || acked == "none" {
+			fmt.Println("    Acked:           —")
+		} else {
+			// MODE_ACKED format: "<value>@<ms>"
+			at := strings.IndexByte(acked, '@')
+			val := acked
+			ts := ""
+			if at >= 0 {
+				val = acked[:at]
+				ts = acked[at+1:]
+			}
+			name := modeNames[val]
+			if name == "" {
+				name = "?"
+			}
+			if ts != "" {
+				if ms, err := strconv.ParseInt(ts, 10, 64); err == nil {
+					fmt.Printf("    Acked:           %s — %s  (@ %.3f s uptime)\n",
+						val, name, float64(ms)/1000.0)
+				} else {
+					fmt.Printf("    Acked:           %s — %s  (@ %s)\n", val, name, ts)
+				}
+			} else {
+				fmt.Printf("    Acked:           %s — %s\n", val, name)
+			}
+		}
+
+		fmt.Printf("    Coil 0 pending:  %s\n", kv["SLV_COIL0"])
+		fmt.Printf("    Slave traffic:   FC01=%s  FC03=%s  FC04=%s  FC65=%s\n",
+			kv["SLV_FC01"], kv["SLV_FC03"], kv["SLV_FC04"], kv["SLV_FC65"])
+		fmt.Println()
+	}
 
 	// --- Counters (FC06 runtime registers) ---
 	if len(cntKeys) > 0 {
@@ -590,11 +686,12 @@ func usage() {
   %s fetch <output.bin>    — One-shot snapshot of last 2 KiB of RS485 traffic
   %s stream <output.bin>   — Stream live RS485 traffic to file (Ctrl-C to stop)
   %s state [--human-friendly]  — Print decoded panel state; --human-friendly for verbose multiline output
+  %s mode <0|1|2|3>        — Queue a CMD_MODE change (Stop/Min/Normal/Max)
   %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
   %s scan                  — Scan and print RSSI for flexitMC3 (Ctrl-C to stop)
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -632,6 +729,11 @@ func main() {
 			}
 		}
 		cmdState(humanFriendly)
+	case "mode":
+		if len(os.Args) < 3 {
+			usage()
+		}
+		cmdMode(os.Args[2])
 	case "list":
 		cmdList()
 	case "scan":

@@ -2,6 +2,9 @@
 #include "rs485_store.h"
 #include "ble_transport.h"
 #include "panel_mirror.h"
+#include "flexit_slave.h"
+
+#include <errno.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -50,6 +53,29 @@ static atomic_t next_buf;
 static atomic_t dropped_bytes;     /* ring-buffer overflow counter */
 static atomic_t stop_events;       /* UART_RX_STOPPED count (overrun/framing) */
 
+/* TX path
+ * --------
+ * The bus is half-duplex: while DE is asserted the SP3485's receiver is
+ * disabled (RE# is tied to DE on the XIAO-RS485 expansion board). Bytes we
+ * place on the wire are therefore not echoed back into our own DMA buffers.
+ *
+ * tx_done_sem is given by the async callback on UART_TX_DONE/UART_TX_ABORTED
+ * so the caller of rs485_uart_send() can block on the completion of one
+ * frame. tx_mutex serializes multiple transmitters.
+ */
+static K_SEM_DEFINE(tx_done_sem, 0, 1);
+static K_MUTEX_DEFINE(tx_mutex);
+static volatile int tx_result; /* 0 on TX_DONE, -ECANCELED on TX_ABORTED */
+
+/* Driver-settle delays around DE toggling.
+ *   pre  — ensures DE has reached a stable HIGH before the UARTE clocks
+ *          out the first start bit (otherwise the first bit can be eaten).
+ *   post — ensures the last stop bit has fully cleared the wire before we
+ *          release DE and the line returns to the panel master.
+ * 100 µs is ~11 bit-times at 115200 baud — comfortable margin.
+ */
+#define DE_SETTLE_US 100
+
 /* ---------------------------------------------------------------------------
  * Drain worker: ring buffer → rs485_store + optional BLE streaming
  * ---------------------------------------------------------------------------
@@ -63,6 +89,7 @@ static void drain_work_handler(struct k_work *work)
         rs485_store_append(tmp, (size_t)n);
         ble_transport_forward_rs485(tmp, (size_t)n);
         panel_mirror_feed(tmp, (size_t)n);
+        flexit_slave_feed(tmp, (size_t)n);
     }
 }
 
@@ -116,9 +143,67 @@ static void uart_async_cb(const struct device *dev,
         atomic_inc(&stop_events);
         break;
 
+    case UART_TX_DONE:
+        tx_result = 0;
+        k_sem_give(&tx_done_sem);
+        break;
+
+    case UART_TX_ABORTED:
+        tx_result = -ECANCELED;
+        k_sem_give(&tx_done_sem);
+        break;
+
     default:
         break;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Public TX
+ * ---------------------------------------------------------------------------
+ */
+int rs485_uart_send(const uint8_t *frame, size_t len)
+{
+    if (frame == NULL || len == 0) {
+        return -EINVAL;
+    }
+    if (!device_is_ready(uart_dev)) {
+        return -ENODEV;
+    }
+
+    k_mutex_lock(&tx_mutex, K_FOREVER);
+
+    /* Drain any stale completion left over from a previous aborted TX. */
+    k_sem_reset(&tx_done_sem);
+    tx_result = 0;
+
+    /* Drive bus and wait for the transceiver to settle. */
+    gpio_pin_set_dt(&de_gpio, 1);
+    k_busy_wait(DE_SETTLE_US);
+
+    int err = uart_tx(uart_dev, frame, len, SYS_FOREVER_US);
+    if (err) {
+        gpio_pin_set_dt(&de_gpio, 0);
+        k_mutex_unlock(&tx_mutex);
+        return err;
+    }
+
+    /* Wait for the callback to signal TX_DONE/TX_ABORTED. A 100 ms bound is
+     * far longer than any realistic frame (179 B @ 115200 ≈ 15.5 ms).
+     */
+    if (k_sem_take(&tx_done_sem, K_MSEC(100)) != 0) {
+        (void)uart_tx_abort(uart_dev);
+        gpio_pin_set_dt(&de_gpio, 0);
+        k_mutex_unlock(&tx_mutex);
+        return -ETIMEDOUT;
+    }
+
+    k_busy_wait(DE_SETTLE_US);
+    gpio_pin_set_dt(&de_gpio, 0);
+
+    int result = tx_result;
+    k_mutex_unlock(&tx_mutex);
+    return result;
 }
 
 /* ---------------------------------------------------------------------------

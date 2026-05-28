@@ -1,8 +1,10 @@
 #include "ble_transport.h"
+#include "flexit_slave.h"
 #include "rs485_store.h"
 #include "panel_mirror.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -333,6 +335,47 @@ static size_t format_state_line(char *buf, size_t cap)
     }
     size_t pos = ((size_t)w < cap) ? (size_t)w : cap - 1;
 
+    /* Append slave-side cycle state so the client can watch the mode
+     * change progress without a separate command. MODE_QUEUED is what the
+     * BLE side asked for; MODE_ACKED reflects the FC65 that closes the
+     * cycle. Either may be "none" before the first command of the boot.
+     */
+    struct flexit_slave_snapshot sl;
+    flexit_slave_snapshot(&sl);
+    if (pos < cap - 1) {
+        if (sl.pending_mode == 0xFFFFu) {
+            w = snprintf(buf + pos, cap - pos, " MODE_QUEUED=none");
+        } else {
+            w = snprintf(buf + pos, cap - pos, " MODE_QUEUED=%u",
+                         sl.pending_mode);
+        }
+        if (w > 0 && (size_t)w < cap - pos) {
+            pos += (size_t)w;
+        }
+    }
+    if (pos < cap - 1) {
+        if (sl.last_acked_mode == 0xFFFFu) {
+            w = snprintf(buf + pos, cap - pos, " MODE_ACKED=none");
+        } else {
+            w = snprintf(buf + pos, cap - pos,
+                         " MODE_ACKED=%u@%llu",
+                         sl.last_acked_mode,
+                         (unsigned long long)sl.last_ack_uptime_ms);
+        }
+        if (w > 0 && (size_t)w < cap - pos) {
+            pos += (size_t)w;
+        }
+    }
+    if (pos < cap - 1) {
+        w = snprintf(buf + pos, cap - pos,
+                     " SLV_FC01=%u SLV_FC03=%u SLV_FC04=%u SLV_FC65=%u SLV_COIL0=%u",
+                     sl.fc01_serviced, sl.fc03_serviced, sl.fc04_serviced,
+                     sl.fc65_acks, sl.coil0_pending ? 1u : 0u);
+        if (w > 0 && (size_t)w < cap - pos) {
+            pos += (size_t)w;
+        }
+    }
+
     uint64_t now = (uint64_t)k_uptime_get();
     for (int i = 0; i < PANEL_MIRROR_COUNTER_SLOTS && pos < cap - 1; i++) {
         if (!s.counters[i].used) {
@@ -364,10 +407,12 @@ static size_t format_state_line(char *buf, size_t cap)
  * NUS receive — command dispatch
  *
  * Commands (sent by ble-client via NUS RX write):
- *   "fetch"  — take a one-shot snapshot of rs485_store and send it
- *   "stream" — start forwarding RS485 bytes in real time over NUS TX
- *   "stop"   — stop streaming
- *   "state"  — single-line snapshot of the decoded panel mirror
+ *   "fetch"   — take a one-shot snapshot of rs485_store and send it
+ *   "stream"  — start forwarding RS485 bytes in real time over NUS TX
+ *   "stop"    — stop streaming
+ *   "state"   — single-line snapshot of the decoded panel mirror
+ *   "mode N"  — queue a CMD_MODE change (N = 0..3) on the Modbus slave;
+ *               echoes "mode: queued=N" or "mode: bad arg" on NUS TX
  * ---------------------------------------------------------------------------
  */
 static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len)
@@ -385,7 +430,7 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
         atomic_set(&stream_active, 1);
 
     } else if (len >= 5 && memcmp(data, "state", 5) == 0) {
-        char   line[480];
+        char   line[512];
         size_t n = format_state_line(line, sizeof(line));
         int    err = bt_nus_send(conn, (const uint8_t *)line, (uint16_t)n);
         if (err) {
@@ -395,6 +440,39 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
     } else if (len >= 4 && memcmp(data, "stop", 4) == 0) {
         printk("stream: stopped\n");
         atomic_set(&stream_active, 0);
+
+    } else if (len >= 4 && memcmp(data, "mode", 4) == 0) {
+        /* Parse the rest of the payload as a decimal integer 0..3. */
+        char    buf[16];
+        char    reply[40];
+        size_t  copy = (len < sizeof(buf) - 1) ? len : sizeof(buf) - 1;
+        memcpy(buf, data, copy);
+        buf[copy] = '\0';
+
+        char *p = buf + 4;
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+
+        int n_reply;
+        if (*p < '0' || *p > '9') {
+            n_reply = snprintf(reply, sizeof(reply),
+                               "mode: bad arg\n");
+        } else {
+            int mode = atoi(p);
+            int err  = flexit_slave_queue_mode((uint16_t)mode);
+            if (err == 0) {
+                n_reply = snprintf(reply, sizeof(reply),
+                                   "mode: queued=%d\n", mode);
+            } else {
+                n_reply = snprintf(reply, sizeof(reply),
+                                   "mode: bad arg\n");
+            }
+        }
+        if (n_reply > 0) {
+            (void)bt_nus_send(conn, (const uint8_t *)reply,
+                              (uint16_t)n_reply);
+        }
     }
 }
 
