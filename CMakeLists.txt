@@ -8,6 +8,5 @@ target_sources(app PRIVATE
     src/ble_transport.c
     src/flexit_slave.c
     src/panel_mirror.c
-    src/rs485_store.c
     src/rs485_uart.c
 )

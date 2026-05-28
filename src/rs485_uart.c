@@ -1,5 +1,4 @@
 #include "rs485_uart.h"
-#include "rs485_store.h"
 #include "ble_transport.h"
 #include "panel_mirror.h"
 #include "flexit_slave.h"
@@ -77,7 +76,7 @@ static volatile int tx_result; /* 0 on TX_DONE, -ECANCELED on TX_ABORTED */
 #define DE_SETTLE_US 100
 
 /* ---------------------------------------------------------------------------
- * Drain worker: ring buffer → rs485_store + optional BLE streaming
+ * Drain worker: ring buffer → BLE streaming + panel mirror + slave
  * ---------------------------------------------------------------------------
  */
 static void drain_work_handler(struct k_work *work)
@@ -86,7 +85,6 @@ static void drain_work_handler(struct k_work *work)
     uint8_t tmp[128];
     uint32_t n;
     while ((n = ring_buf_get(&rs485_ring, tmp, sizeof(tmp))) > 0) {
-        rs485_store_append(tmp, (size_t)n);
         ble_transport_forward_rs485(tmp, (size_t)n);
         panel_mirror_feed(tmp, (size_t)n);
         flexit_slave_feed(tmp, (size_t)n);
@@ -203,14 +201,13 @@ int rs485_uart_send(const uint8_t *frame, size_t len)
 
     int result = tx_result;
 
-    /* Echo our own TX into the capture stream. The SP3485 has RE# tied to
-     * DE, so the UARTE never sees what we just sent — without this echo, any
-     * BLE-side capture (`ble-client stream`, `ble-client fetch`) reflects
-     * only what we receive, never what we transmit. Skip on TX errors so the
-     * capture doesn't contain phantom frames the wire never carried.
+    /* Echo our own TX into the stream. The SP3485 has RE# tied to DE, so
+     * the UARTE never sees what we just sent — without this echo, a
+     * `ble-client stream` capture reflects only what we receive, never what
+     * we transmit. Skip on TX errors so the capture doesn't contain phantom
+     * frames the wire never carried.
      */
     if (result == 0) {
-        rs485_store_append(frame, len);
         ble_transport_forward_rs485(frame, len);
     }
 

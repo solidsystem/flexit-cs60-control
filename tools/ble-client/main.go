@@ -107,109 +107,6 @@ func openNUS(device bluetooth.Device) (tx, rx bluetooth.DeviceCharacteristic) {
 	return tx, rx
 }
 
-// cmdFetch connects, sends "fetch", receives the RS485 snapshot and writes
-// raw bytes to outputPath.
-//
-// Protocol (device → client via NUS TX notifications):
-//
-//	Bytes 0-3   : total payload length N, little-endian uint32
-//	Bytes 4-N+3 : raw RS485 bytes, oldest first
-//
-// On Ctrl-C, any bytes already received are written to the file before exit.
-func cmdFetch(outputPath string) {
-	sysbus, err := dbus.SystemBus()
-	must("system dbus", err)
-	registerPairingAgent(sysbus)
-
-	device := connectBLE()
-	defer device.Disconnect()
-
-	txChar, rxChar := openNUS(device)
-
-	notifyCh := make(chan []byte, 64)
-	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
-		b := make([]byte, len(buf))
-		copy(b, buf)
-		notifyCh <- b
-	}))
-
-	fmt.Println("Sending 'fetch'...")
-	_, werr := rxChar.WriteWithoutResponse([]byte("fetch"))
-	must("write fetch", werr)
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	deadline := time.After(30 * time.Second)
-
-	var raw []byte
-	var totalLen uint32
-	headerDone := false
-
-collect:
-	for {
-		if headerDone && uint32(len(raw)) >= 4+totalLen {
-			break collect
-		}
-		select {
-		case chunk := <-notifyCh:
-			raw = append(raw, chunk...)
-			if !headerDone && len(raw) >= 4 {
-				totalLen = uint32(raw[0]) | uint32(raw[1])<<8 |
-					uint32(raw[2])<<16 | uint32(raw[3])<<24
-				fmt.Printf("Expecting %d bytes of RS485 snapshot\n", totalLen)
-				headerDone = true
-				if totalLen == 0 {
-					break collect
-				}
-			}
-		case <-sig:
-			fmt.Println("\nInterrupted — writing partial data")
-			writeFetchResult(outputPath, raw, headerDone, totalLen, true)
-			return
-		case <-deadline:
-			recvd := 0
-			if len(raw) > 4 {
-				recvd = len(raw) - 4
-			}
-			if headerDone {
-				fmt.Fprintf(os.Stderr, "Timeout: received %d/%d bytes — writing partial data\n",
-					recvd, totalLen)
-				writeFetchResult(outputPath, raw, headerDone, totalLen, true)
-			} else {
-				log.Fatal("Timeout waiting for fetch response")
-			}
-			return
-		}
-	}
-
-	writeFetchResult(outputPath, raw, headerDone, totalLen, false)
-}
-
-// writeFetchResult extracts the payload from the raw accumulated bytes and
-// writes it to outputPath. partial=true means the transfer was cut short.
-func writeFetchResult(outputPath string, raw []byte, headerDone bool, totalLen uint32, partial bool) {
-	if !headerDone || len(raw) < 4 {
-		fmt.Fprintln(os.Stderr, "No data received — nothing written")
-		return
-	}
-
-	end := 4 + int(totalLen)
-	if end > len(raw) {
-		end = len(raw) // clamp to what we actually have
-	}
-	snapshot := raw[4:end]
-
-	if err := os.WriteFile(outputPath, snapshot, 0o644); err != nil {
-		log.Fatalf("write output: %v", err)
-	}
-
-	if partial {
-		fmt.Printf("Wrote %d/%d bytes (partial) to %s\n", len(snapshot), totalLen, outputPath)
-	} else {
-		fmt.Printf("Wrote %d bytes to %s\n", len(snapshot), outputPath)
-	}
-}
-
 // cmdStream connects, sends "stream", and appends every RS485 notification
 // to outputPath until Ctrl-C. Sends "stop" before disconnecting.
 func cmdStream(outputPath string) {
@@ -683,7 +580,6 @@ func cmdList() {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  %s fetch <output.bin>    — One-shot snapshot of last 2 KiB of RS485 traffic
   %s stream <output.bin>   — Stream live RS485 traffic to file (Ctrl-C to stop)
   %s state [--human-friendly]  — Print decoded panel state; --human-friendly for verbose multiline output
   %s mode <0|1|2|3>        — Queue a CMD_MODE change (Stop/Min/Normal/Max)
@@ -691,7 +587,7 @@ func usage() {
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
   %s scan                  — Scan and print RSSI for flexitMC3 (Ctrl-C to stop)
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -701,11 +597,6 @@ func main() {
 	}
 
 	switch os.Args[1] {
-	case "fetch":
-		if len(os.Args) < 3 {
-			usage()
-		}
-		cmdFetch(os.Args[2])
 	case "stream":
 		if len(os.Args) < 3 {
 			usage()

@@ -1,6 +1,5 @@
 #include "ble_transport.h"
 #include "flexit_slave.h"
-#include "rs485_store.h"
 #include "panel_mirror.h"
 
 #include <stdio.h>
@@ -44,8 +43,7 @@ void ble_transport_forward_rs485(const uint8_t *data, size_t len)
 
     /* bt_nus_send() requires the payload to fit within ATT_MTU - 3.
      * Query the negotiated MTU; fall back to 20 (BLE default) if not yet
-     * exchanged. Remaining bytes are dropped on TX pool exhaustion —
-     * the rs485_store ring always retains a copy for a later fetch.
+     * exchanged. Remaining bytes are dropped on TX pool exhaustion.
      */
     uint16_t att_mtu   = bt_gatt_get_mtu(current_conn);
     uint16_t chunk_max = (att_mtu > 3u) ? (att_mtu - 3u) : 20u;
@@ -57,77 +55,6 @@ void ble_transport_forward_rs485(const uint8_t *data, size_t len)
             break; /* TX pool full or disconnected — drop remainder */
         }
         off += chunk;
-    }
-}
-
-/* ---------------------------------------------------------------------------
- * One-shot snapshot fetch over NUS
- *
- * Protocol (device → client via NUS TX notifications):
- *   Byte 0-3   : total payload length N, little-endian uint32
- *   Byte 4-N+3 : raw RS485 bytes, oldest first
- *
- * State machine uses fetch_pos == FETCH_HDR_PENDING to mean "header not
- * yet sent".
- * ---------------------------------------------------------------------------
- */
-#define FETCH_CHUNK_SIZE  200u
-#define FETCH_HDR_PENDING UINT32_MAX
-
-static uint8_t  fetch_buf[RS485_STORE_SIZE];
-static uint32_t fetch_total;
-static uint32_t fetch_pos;
-
-static void fetch_send_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(fetch_send_work, fetch_send_work_handler);
-
-static void fetch_send_work_handler(struct k_work *work)
-{
-    if (!current_conn) {
-        return;
-    }
-
-    int err;
-
-    if (fetch_pos == FETCH_HDR_PENDING) {
-        uint8_t hdr[4] = {
-            (uint8_t)(fetch_total),
-            (uint8_t)(fetch_total >> 8),
-            (uint8_t)(fetch_total >> 16),
-            (uint8_t)(fetch_total >> 24),
-        };
-        err = bt_nus_send(current_conn, hdr, sizeof(hdr));
-        if (err == -ENOMEM) {
-            k_work_schedule(k_work_delayable_from_work(work), K_MSEC(20));
-            return;
-        }
-        if (err != 0) {
-            printk("fetch: header send error %d\n", err);
-            return;
-        }
-        fetch_pos = 0;
-    }
-
-    if (fetch_pos < fetch_total) {
-        uint32_t rem   = fetch_total - fetch_pos;
-        uint32_t chunk = MIN(rem, FETCH_CHUNK_SIZE);
-
-        err = bt_nus_send(current_conn, fetch_buf + fetch_pos, chunk);
-        if (err == -ENOMEM) {
-            k_work_schedule(k_work_delayable_from_work(work), K_MSEC(20));
-            return;
-        }
-        if (err != 0) {
-            printk("fetch: data send error %d at offset %u\n", err, fetch_pos);
-            return;
-        }
-        fetch_pos += chunk;
-
-        if (fetch_pos < fetch_total) {
-            k_work_schedule(k_work_delayable_from_work(work), K_MSEC(10));
-        } else {
-            printk("fetch: sent %u bytes\n", fetch_total);
-        }
     }
 }
 
@@ -204,7 +131,6 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     printk("BLE disconnected: %s (reason 0x%02x)\n", addr, reason);
 
     atomic_set(&stream_active, 0);
-    k_work_cancel_delayable(&fetch_send_work);
 
     if (current_conn == conn) {
         bt_conn_unref(current_conn);
@@ -407,7 +333,6 @@ static size_t format_state_line(char *buf, size_t cap)
  * NUS receive — command dispatch
  *
  * Commands (sent by ble-client via NUS RX write):
- *   "fetch"   — take a one-shot snapshot of rs485_store and send it
  *   "stream"  — start forwarding RS485 bytes in real time over NUS TX
  *   "stop"    — stop streaming
  *   "state"   — single-line snapshot of the decoded panel mirror
@@ -419,13 +344,7 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
 {
     printk("NUS RX: %.*s\n", len, (const char *)data);
 
-    if (len >= 5 && memcmp(data, "fetch", 5) == 0) {
-        printk("fetch: snapshotting RS485 store\n");
-        fetch_total = (uint32_t)rs485_store_snapshot(fetch_buf, sizeof(fetch_buf));
-        fetch_pos   = FETCH_HDR_PENDING;
-        k_work_schedule(&fetch_send_work, K_NO_WAIT);
-
-    } else if (len >= 6 && memcmp(data, "stream", 6) == 0) {
+    if (len >= 6 && memcmp(data, "stream", 6) == 0) {
         printk("stream: started\n");
         atomic_set(&stream_active, 1);
 

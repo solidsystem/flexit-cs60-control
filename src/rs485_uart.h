@@ -6,8 +6,8 @@
 
 /* Initialize RS485 UART receive on the alias 'rs485-uart' (uart0).
  * Sets the DE/RE GPIO to receive mode (LOW = high-Z), enables the async
- * UART API with double-buffered DMA and feeds incoming bytes into the
- * rs485_store and panel_mirror_feed/flexit_slave_feed.
+ * UART API with double-buffered DMA and feeds incoming bytes into
+ * ble_transport_forward_rs485, panel_mirror_feed and flexit_slave_feed.
  * Returns 0 on success, negative errno on failure.
  */
 int rs485_uart_init(void);

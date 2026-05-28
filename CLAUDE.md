@@ -114,9 +114,6 @@ go build -o ble-client .
 ### Subcommands
 
 ```bash
-# One-shot snapshot: fetch the last 2 KiB of recorded RS485 traffic
-./ble-client fetch rs485_capture.bin
-
 # Continuous capture: stream live RS485 bytes to file (Ctrl-C to stop)
 ./ble-client stream rs485_live.bin
 
@@ -145,10 +142,9 @@ go build -o ble-client .
 ./ble-client list
 ```
 
-Both `fetch` and `stream` write raw RS485 bytes. Use `xxd` to inspect:
-`xxd rs485_capture.bin | head`
+`stream` writes raw RS485 bytes. Use `xxd` to inspect:
+`xxd rs485_live.bin | head`
 
-`fetch` is interrupted with partial data written if Ctrl-C is pressed mid-transfer.
 `stream` sends a `"stop"` command before disconnecting so the firmware cleanly
 disables forwarding.
 

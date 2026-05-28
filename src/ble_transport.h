@@ -18,7 +18,7 @@ void ble_transport_ensure_advertising(void);
 /* Forward raw RS485 bytes over NUS TX if a client has requested streaming
  * (sent the "stream" command). Called from the rs485_uart drain work handler
  * on the system workqueue. Bytes are dropped silently if the BLE TX pool is
- * exhausted — rs485_store always retains a copy.
+ * exhausted.
  */
 void ble_transport_forward_rs485(const uint8_t *data, size_t len);
 
