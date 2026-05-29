@@ -115,12 +115,13 @@ change) so HA receives push updates instead of polling.
 
 ## Open questions / risks
 
-Still unverified (needs hardware + a coordinator): actual network join, mode/temperature
-round-trips, a BLE DFU performed while joined to the Zigbee mesh
+Network join is **verified** (2026-05-29, see Phase 1). Still unverified: mode/temperature
+round-trips (Phase 2 data model not yet wired) and a BLE DFU performed while joined to the
+Zigbee mesh.
 
 ## TODO
 
-### Phase 1 — Firmware: dual-protocol skeleton ✅ DONE (build + BLE on hardware); ⏳ Zigbee runtime pending
+### Phase 1 — Firmware: dual-protocol skeleton ✅ DONE (build + BLE + Zigbee join on hardware); ⏳ a few runtime checks remain
 - [x] Register `ncs-zigbee` (commit `8a6c6ca`) so PM discovers the ZBOSS partitions
       (via `ZEPHYR_EXTRA_MODULES` + static `pm_static.yml`).
 - [x] Enable MPSL-based BLE + 802.15.4 multiprotocol; kept `CONFIG_MCUMGR_TRANSPORT_BT`.
@@ -128,7 +129,11 @@ round-trips, a BLE DFU performed while joined to the Zigbee mesh
 - [x] Define a Zigbee end-device context (HA Temperature Sensor) that compiles & links.
 - [x] **(hardware)** First SWD/J-Link flash of `merged.hex`; boots, BLE adv + pair (444999)
       + NUS verified; BLE/Zigbee coexist at runtime (see Hardware verification, 2026-05-29).
-- [ ] **(runtime)** Confirm the end device actually joins ZHA/Z2M (rx-on-when-idle).
+- [x] **(runtime)** Confirm the end device actually joins a coordinator (rx-on-when-idle).
+      ✅ 2026-05-29: joined the Nordic `network_coordinator` test coordinator
+      (`tools/zb-coordinator`, flashed on the nrf52840dk) — PAN 0x4716, confirmed from both
+      consoles (coordinator "New device commissioned"; XIAO "Joined network successfully").
+      Joining a real ZHA/Z2M coordinator is Phase 3.
 - [ ] **(runtime)** Confirm BLE NUS + SMP DFU still work while Zigbee is joined.
 - [ ] **(runtime)** Confirm RS485 decode populates `state` once the CS60 bus is reconnected.
 - [x] Channel selection — set `CONFIG_ZIGBEE_CHANNEL_SELECTION_MODE_MULTI=y` so the end
@@ -157,4 +162,9 @@ round-trips, a BLE DFU performed while joined to the Zigbee mesh
 
 - `flexit-cs60-communication.md` — reverse-engineered RS485/Modbus protocol.
 - `tools/ble-client` — existing BLE tooling (stream/state/mode/flash).
+- `tools/zb-coordinator` — test Zigbee coordinator (ncs-zigbee `network_coordinator` + a static
+  PM file) for the nrf52840dk; used to verify the end-device join. Build with
+  `-DZEPHYR_EXTRA_MODULES=$HOME/ncs/v3.3.0/ncs-zigbee` (after `--`), flash with `west flash`.
+  Note: this replaces the `hci_usb` BLE adapter on the DK, so `ble-client` is offline while the
+  coordinator runs (restore with `west flash --build-dir build-hci-usb`).
 - HA ZHA integration: https://www.home-assistant.io/integrations/zha/
