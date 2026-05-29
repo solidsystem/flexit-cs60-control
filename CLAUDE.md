@@ -42,8 +42,6 @@ source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
 nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- <command>
 ```
 
-If needed, read about managing and initializing SDK toolchain at https://docs.nordicsemi.com/bundle/nrfutil/page/nrfutil-toolchain-manager/nrfutil-toolchain-manager.html
-
 ## Common Commands
 
 ```bash
@@ -67,8 +65,6 @@ nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
 ## Flashing
 
 **Normal workflow: BLE DFU** — see the `BLE client` section below.
-
-**Do not use `west flash`** — it targets the J-Link on the nrf52840dk, not the xiao_ble.
 
 ### USB DFU via mcu-manager
 
@@ -158,10 +154,6 @@ cd tools/ble-client
 # 3. Confirm after device reboots (~10s)
 ./ble-client confirm <hash printed by flash>
 ```
-
-**Tip:** If connection fails with `le-connection-abort-by-local`, check signal strength
-with `./ble-client scan` first (need -75 dBm or better). If signal is fine, restart
-BlueZ: `sudo systemctl restart bluetooth`.
 
 The firmware must keep `CONFIG_MCUMGR_TRANSPORT_BT=y` and
 `CONFIG_MCUMGR_TRANSPORT_BT_PERM_RW_AUTHEN=y` so the BLE SMP server is active.
