@@ -121,7 +121,12 @@ Zigbee mesh.
 
 ## TODO
 
-### Phase 1 — Firmware: dual-protocol skeleton ✅ DONE (build + BLE + Zigbee join on hardware); ⏳ a few runtime checks remain
+Ordered by dependency: everything that runs on the **current bench** (the `tools/zb-coordinator`
+test coordinator is up; the `hci_usb` BLE adapter and the CS60/RS485 bus are **disconnected**)
+comes first, so all the Zigbee work is finished before the steps that need BLE or RS485 wired
+back in. Phases 2–3 need neither; Phase 4 needs the CS60 bus; Phase 5 needs the BLE adapter.
+
+### Phase 1 — Firmware: dual-protocol skeleton ✅ DONE
 - [x] Register `ncs-zigbee` (commit `8a6c6ca`) so PM discovers the ZBOSS partitions
       (via `ZEPHYR_EXTRA_MODULES` + static `pm_static.yml`).
 - [x] Enable MPSL-based BLE + 802.15.4 multiprotocol; kept `CONFIG_MCUMGR_TRANSPORT_BT`.
@@ -134,26 +139,45 @@ Zigbee mesh.
       (`tools/zb-coordinator`, flashed on the nrf52840dk) — PAN 0x4716, confirmed from both
       consoles (coordinator "New device commissioned"; XIAO "Joined network successfully").
       Joining a real ZHA/Z2M coordinator is Phase 3.
-- [ ] **(runtime)** Confirm BLE NUS + SMP DFU still work while Zigbee is joined.
-- [ ] **(runtime)** Confirm RS485 decode populates `state` once the CS60 bus is reconnected.
 - [x] Channel selection — set `CONFIG_ZIGBEE_CHANNEL_SELECTION_MODE_MULTI=y` so the end
       device scans all channels (11-26) to find the HA coordinator. Nordic's documented
       recommendation for joining a third-party (ZHA/Z2M) coordinator; no fixed channel needed.
 
-### Phase 2 — Firmware: data model
-- [ ] Implement endpoints/clusters per [data model](#clusters--endpoints).
-- [ ] Wire Temperature `MeasuredValue` from the RS485 state decode (shared core).
-- [ ] Wire Fan Control `FanMode`: read current mode; on write, trigger `CMD_MODE`.
-- [ ] Configure attribute reporting for temps and mode.
+### Phase 2 — Zigbee data model + bench verification — **do now** (no BLE / no CS60 needed)
+Implement and exercise the full Zigbee data path with **synthetic values**, decoupled from the
+RS485 decode, so the radio side is finished before the CS60 bus is reconnected (Phase 4 swaps the
+synthetic feeds for real data).
+- [ ] Implement endpoints/clusters per [data model](#clusters--endpoints) (Fan Control EP +
+      per-temperature Temperature Measurement EPs).
+- [ ] Drive the clusters with synthetic values (e.g. a temperature ramp + cycling `FanMode`) via
+      the existing `zigbee_ep_set_*` API, with no dependency on the RS485 decode.
+- [ ] Configure attribute reporting for temps + `FanMode`; confirm push updates reach the coordinator.
+- [ ] Wire the `FanMode` **write** path to a stub `CMD_MODE` sink (log/queue) so the Zigbee write
+      is verifiable now; the real RS485 injection is Phase 4.
+- [ ] Bench tooling: the minimal `network_coordinator` only does Basic/Identify + steering, so it
+      can't read/write attributes. Bring up a ZCL-capable coordinator — the ncs-zigbee `shell`
+      sample (Zigbee CLI: `zcl attr read/write`, reporting config) on the DK — to exercise reads,
+      writes, and reporting end-to-end.
 
-### Phase 3 — Home Assistant
-- [ ] Pair the device to ZHA (or Z2M); verify auto-discovered entities.
+### Phase 3 — Home Assistant pairing (needs a ZHA/Z2M coordinator; no BLE / no CS60 needed)
+- [ ] Pair the device to ZHA (or Z2M); verify the auto-discovered entities (structure validates
+      against the Phase 2 synthetic feed).
 - [ ] Add ZHA quirk / Z2M external converter if the mode mapping needs it.
-- [ ] Validate read (temps, mode) and write (set mode) end-to-end from HA.
 
-### Phase 4 — Hardening
-- [ ] Availability / stale-data handling in HA when the bridge or mesh drops.
+### Phase 4 — RS485 integration (needs the CS60 bus reconnected)
+- [ ] Wire Temperature `MeasuredValue` from the real RS485 state decode (shared core) — replaces
+      the Phase 2 synthetic feed.
+- [ ] Wire Fan Control `FanMode`: read current mode; on write, trigger the real `CMD_MODE`
+      injection — replaces the Phase 2 stub sink.
+- [ ] Confirm RS485 decode populates `state` once the CS60 bus is reconnected.
+- [ ] End-to-end: set mode over Zigbee → CS60 reacts; CS60 temps change → seen over Zigbee and in HA.
+
+### Phase 5 — BLE service-port + hardening (needs the `hci_usb` adapter restored)
+Reflash `hci_usb` to the DK (`west flash --build-dir build-hci-usb`); this tears down the test
+coordinator, so run these only after the Zigbee/RS485 work above is complete.
+- [ ] **(runtime)** Confirm BLE NUS + SMP DFU still work while Zigbee is joined.
 - [ ] Confirm DFU over BLE while the device is live on the Zigbee network.
+- [ ] Availability / stale-data handling in HA when the bridge or mesh drops.
 - [ ] Document the operational runbook (join, re-join after DFU, debug via BLE).
 
 ---
