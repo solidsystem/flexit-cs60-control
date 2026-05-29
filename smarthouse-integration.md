@@ -160,17 +160,25 @@ synthetic feeds for real data). Verified over the air against the `tools/zb-shel
 - [x] Bench tooling: `tools/zb-shell` (ncs-zigbee `shell` sample + static PM) on the DK. It resumes
       the persisted `0x4716` network from NVRAM (`bdb role zc` / `bdb start`), so the XIAO stays
       joined. Verified reads: `FanMode`=Off, supply 22.90 °C, extract 25.50 °C, outdoor 7.40 °C.
-- [~] Attribute reporting: `FanMode` + temps are declared reportable and the device **accepts
-      Configure Reporting** (success response). Live unsolicited reports were **not** observed via
-      the shell because ZBOSS only reports to bound destinations and `zcl subscribe` does not create
-      the binding. ZHA/Z2M bind automatically, so confirm live push updates in Phase 3.
+- [x] Attribute reporting: `FanMode` + temps declared reportable; device accepts Configure
+      Reporting. Confirmed live (2026-05-30): after a manual `zdo bind` of the temp cluster to the
+      coordinator, the XIAO streamed unsolicited reports (~10 in 30 s as the synthetic ramp moved).
+      ZBOSS only reports to **bound** destinations, so the binding is required — ZHA/Z2M create it
+      automatically; the bench `zcl subscribe` alone does not.
 
 ### Phase 3 — Home Assistant pairing (needs a ZHA/Z2M coordinator; no BLE / no CS60 needed)
-- [ ] Pair the device to ZHA (or Z2M); verify the auto-discovered entities (structure validates
-      against the Phase 2 synthetic feed).
-- [ ] Confirm live attribute reporting (temps + `FanMode`) — ZHA/Z2M bind the clusters
-      automatically, which is the binding the bench shell did not set up (see Phase 2).
-- [ ] Add ZHA quirk / Z2M external converter if the mode mapping needs it.
+Prep done off-HA (2026-05-30); the remaining items need a live ZHA/Z2M coordinator in HA.
+- [x] Device identity: added ManufacturerName `SolidSystem` + ModelIdentifier `flexitMC3` to the
+      Basic cluster (read back over the air) so HA names the device and Z2M can match a converter.
+- [x] Authored `tools/ha/` artifacts: a ZHA v2 quirk (`zha_quirk_flexitmc.py`, friendly
+      supply/extract/outdoor names), a Z2M external converter (`zigbee2mqtt_flexitmc.js`), and a
+      `README.md` runbook with the exact Zigbee signature. **Untested** against a live HA/Z2M.
+- [x] Live attribute reporting — proven at the protocol level via the bench shell (see Phase 2);
+      ZHA/Z2M will set up the same binding automatically.
+- [ ] Pair the device to ZHA (or Z2M) on real HA hardware; verify the auto-discovered entities
+      (one device: a fan + three temperature sensors) and that reads/writes/reports work in the UI.
+- [ ] Validate / tweak the quirk + converter against your ZHA (zigpy) and Z2M versions; add the
+      friendly temp names (or just rename in the HA UI).
 
 ### Phase 4 — RS485 integration (needs the CS60 bus reconnected)
 - [ ] Wire Temperature `MeasuredValue` from the real RS485 state decode (shared core) — replaces
@@ -199,4 +207,9 @@ coordinator, so run these only after the Zigbee/RS485 work above is complete.
   `-DZEPHYR_EXTRA_MODULES=$HOME/ncs/v3.3.0/ncs-zigbee` (after `--`), flash with `west flash`.
   Note: this replaces the `hci_usb` BLE adapter on the DK, so `ble-client` is offline while the
   coordinator runs (restore with `west flash --build-dir build-hci-usb`).
+- `tools/zb-shell` — ZCL-capable bench coordinator (ncs-zigbee `shell` sample + static PM) for the
+  nrf52840dk. Resumes the persisted network from NVRAM (`bdb role zc` / `bdb start`); drive ZCL over
+  `/dev/ttyACM0` (`zcl attr read/write`, `zdo bind`, `zcl subscribe`). Used to verify Phase 2/3.
+- `tools/ha` — Home Assistant integration artifacts: ZHA v2 quirk, Z2M external converter, and a
+  runbook with the device's Zigbee signature.
 - HA ZHA integration: https://www.home-assistant.io/integrations/zha/

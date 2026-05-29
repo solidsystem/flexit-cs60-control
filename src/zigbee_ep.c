@@ -104,10 +104,24 @@ ZB_ZCL_DECLARE_IDENTIFY_ATTRIB_LIST(
 	ctrl_identify_attrs,
 	&dev_ctx.identify_attr.identify_time);
 
-ZB_ZCL_DECLARE_BASIC_ATTRIB_LIST(
-	ctrl_basic_attrs,
-	&dev_ctx.basic_attr.zcl_version,
-	&dev_ctx.basic_attr.power_source);
+/* ZCL character strings: leading length byte then the text. The length byte is
+ * kept in its own string literal so the next char can't be eaten by the \x
+ * escape (e.g. "\x09f..." would parse as 0x9f).
+ */
+static zb_char_t basic_mf_name[]  = "\x0b" "SolidSystem";  /* 11 chars */
+static zb_char_t basic_model_id[] = "\x09" "flexitMC3";    /*  9 chars */
+
+/* Basic cluster by hand so it carries ManufacturerName + ModelIdentifier (used
+ * by HA for the device name and by Z2M to match an external converter).
+ */
+ZB_ZCL_START_DECLARE_ATTRIB_LIST_CLUSTER_REVISION(ctrl_basic_attrs, ZB_ZCL_BASIC)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_BASIC_ZCL_VERSION_ID,
+		&dev_ctx.basic_attr.zcl_version)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, basic_mf_name)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, basic_model_id)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_BASIC_POWER_SOURCE_ID,
+		&dev_ctx.basic_attr.power_source)
+ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST;
 
 /* The canned ZB_ZCL_DECLARE_FAN_CONTROL_ATTRIB_LIST marks FanMode read/write
  * only (ZB_ZCL_FAN_CONTROL_REPORT_ATTR_COUNT == 0). Declare it by hand so
