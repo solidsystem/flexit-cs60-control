@@ -31,7 +31,6 @@ int main(void)
         printk("warning: Zigbee init failed — continuing with BLE only\n");
     }
 
-    uint32_t tick = 0;
     while (true) {
         gpio_pin_toggle_dt(&green_led);
         ble_transport_ensure_advertising();
