@@ -1,6 +1,8 @@
 / {
 	chosen {
 		zephyr,code-partition = &boot_partition;
+		/* Secondary slot is in QSPI flash — MCUboot needs to read/erase it. */
+		nordic,pm-ext-flash = &p25q16h;
 	};
 };
 

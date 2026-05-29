@@ -204,7 +204,17 @@ func cmdFlash(imagePath string) {
 	fmt.Println("Images:", list)
 
 	fmt.Println("Uploading image...")
-	must("imageUpload", smp.imageUpload(imagePath, 0))
+	// Size upload chunks off the negotiated ATT MTU (falls back to a safe
+	// default if BlueZ doesn't expose it). With Data Length Extension and a
+	// large MTU this is the difference between 128 B and ~400 B chunks.
+	mtu, mErr := chars[0].GetMTU()
+	if mErr != nil {
+		fmt.Printf("(MTU query failed: %v — using default chunk size)\n", mErr)
+		mtu = 0
+	} else {
+		fmt.Printf("Negotiated ATT MTU: %d\n", mtu)
+	}
+	must("imageUpload", smp.imageUpload(imagePath, int(mtu)))
 	fmt.Println("Upload done.")
 
 	fmt.Println("Reading slot-1 hash...")

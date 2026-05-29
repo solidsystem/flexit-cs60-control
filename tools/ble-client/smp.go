@@ -251,10 +251,15 @@ func (t *smpTransport) imageUpload(path string, mtu int) error {
 	h := sha256.Sum256(data)
 	fmt.Printf("Image: %s (%d bytes), SHA256: %s\n", path, len(data), hex.EncodeToString(h[:]))
 
+	// Each upload chunk is sent as a single write-without-response, so the
+	// whole SMP frame must fit in ATT_MTU-3. Reserve the 8-byte SMP header
+	// plus worst-case CBOR overhead — the first chunk also carries the
+	// 32-byte "sha" field — and size the chunk off the negotiated MTU. A
+	// larger chunk means far fewer per-chunk round trips. Fall back to a
+	// safe 128 B when the MTU is unknown (mtu == 0).
 	chunkSize := 128
 	if mtu > 0 {
-		// SMP header=8, CBOR overhead ~50 bytes for upload fields
-		if cs := mtu - 8 - 60; cs > 0 {
+		if cs := mtu - 96; cs > 0 {
 			chunkSize = cs
 		}
 	}

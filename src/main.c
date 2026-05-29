@@ -5,6 +5,7 @@
 #include "ble_transport.h"
 #include "flexit_slave.h"
 #include "rs485_uart.h"
+#include "zigbee_ep.h"
 
 static const struct gpio_dt_spec green_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
@@ -26,6 +27,11 @@ int main(void)
         return -1;
     }
 
+    if (zigbee_ep_init() < 0) {
+        printk("warning: Zigbee init failed — continuing with BLE only\n");
+    }
+
+    uint32_t tick = 0;
     while (true) {
         gpio_pin_toggle_dt(&green_led);
         ble_transport_ensure_advertising();

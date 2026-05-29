@@ -3,6 +3,8 @@
 / {
 	chosen {
 		zephyr,code-partition = &slot0_partition;
+		/* MCUboot DFU secondary slot lives in the onboard 2 MB QSPI flash. */
+		nordic,pm-ext-flash = &p25q16h;
 	};
 
 	zephyr,user {
