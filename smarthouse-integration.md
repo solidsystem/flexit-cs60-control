@@ -143,25 +143,33 @@ back in. Phases 2–3 need neither; Phase 4 needs the CS60 bus; Phase 5 needs th
       device scans all channels (11-26) to find the HA coordinator. Nordic's documented
       recommendation for joining a third-party (ZHA/Z2M) coordinator; no fixed channel needed.
 
-### Phase 2 — Zigbee data model + bench verification — **do now** (no BLE / no CS60 needed)
-Implement and exercise the full Zigbee data path with **synthetic values**, decoupled from the
+### Phase 2 — Zigbee data model + bench verification ✅ DONE (2026-05-30; reporting caveat)
+Implemented in `src/zigbee_ep.c` and exercised with **synthetic values**, decoupled from the
 RS485 decode, so the radio side is finished before the CS60 bus is reconnected (Phase 4 swaps the
-synthetic feeds for real data).
-- [ ] Implement endpoints/clusters per [data model](#clusters--endpoints) (Fan Control EP +
-      per-temperature Temperature Measurement EPs).
-- [ ] Drive the clusters with synthetic values (e.g. a temperature ramp + cycling `FanMode`) via
-      the existing `zigbee_ep_set_*` API, with no dependency on the RS485 decode.
-- [ ] Configure attribute reporting for temps + `FanMode`; confirm push updates reach the coordinator.
-- [ ] Wire the `FanMode` **write** path to a stub `CMD_MODE` sink (log/queue) so the Zigbee write
-      is verifiable now; the real RS485 injection is Phase 4.
-- [ ] Bench tooling: the minimal `network_coordinator` only does Basic/Identify + steering, so it
-      can't read/write attributes. Bring up a ZCL-capable coordinator — the ncs-zigbee `shell`
-      sample (Zigbee CLI: `zcl attr read/write`, reporting config) on the DK — to exercise reads,
-      writes, and reporting end-to-end.
+synthetic feeds for real data). Verified over the air against the `tools/zb-shell` coordinator.
+- [x] Implement endpoints/clusters per [data model](#clusters--endpoints): EP1 Basic + Identify +
+      Fan Control (`FanMode` rw, made reportable by hand), EP2/EP3/EP4 Temperature Measurement
+      (supply / extract / outdoor). Hand-declared (not the canned HA device-type macro) so EP1 can
+      carry Fan Control and the temp EPs share one simple-descriptor type.
+- [x] Drive the clusters with synthetic values (temperature ramp + slowly cycling `FanMode`) via
+      the `zigbee_ep_set_*` API. Values are latched and pushed into the attributes by a publish
+      tick on the ZBOSS thread — the same path Phase 4 feeds from the RS485 decode.
+- [x] Wire the `FanMode` **write** path to a stub `CMD_MODE` sink (logs the mapped Flexit mode;
+      Phase 4 registers `flexit_slave_queue_mode` via `zigbee_ep_set_mode_write_handler`).
+      Verified: a `FanMode=2` write from the coordinator logged `FanMode write -> Flexit mode 2`.
+- [x] Bench tooling: `tools/zb-shell` (ncs-zigbee `shell` sample + static PM) on the DK. It resumes
+      the persisted `0x4716` network from NVRAM (`bdb role zc` / `bdb start`), so the XIAO stays
+      joined. Verified reads: `FanMode`=Off, supply 22.90 °C, extract 25.50 °C, outdoor 7.40 °C.
+- [~] Attribute reporting: `FanMode` + temps are declared reportable and the device **accepts
+      Configure Reporting** (success response). Live unsolicited reports were **not** observed via
+      the shell because ZBOSS only reports to bound destinations and `zcl subscribe` does not create
+      the binding. ZHA/Z2M bind automatically, so confirm live push updates in Phase 3.
 
 ### Phase 3 — Home Assistant pairing (needs a ZHA/Z2M coordinator; no BLE / no CS60 needed)
 - [ ] Pair the device to ZHA (or Z2M); verify the auto-discovered entities (structure validates
       against the Phase 2 synthetic feed).
+- [ ] Confirm live attribute reporting (temps + `FanMode`) — ZHA/Z2M bind the clusters
+      automatically, which is the binding the bench shell did not set up (see Phase 2).
 - [ ] Add ZHA quirk / Z2M external converter if the mode mapping needs it.
 
 ### Phase 4 — RS485 integration (needs the CS60 bus reconnected)
