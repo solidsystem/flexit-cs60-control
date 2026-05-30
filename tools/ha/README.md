@@ -20,10 +20,20 @@ device in HA.
 Each Temperature Measurement cluster (EP2/3/4) also carries a custom **read-only
 label attribute `0xF000`** (ZCL character string) returning `supply` / `extract` /
 `outdoor`, so an endpoint can be identified by reading one attribute. It is not
-manufacturer-coded (read it with no manufacturer code) and ZHA/Z2M ignore it during
-interview — it creates no entity. Read it via ZHA → *Manage Zigbee device* → the
-endpoint's Temperature Measurement cluster → read attribute `0xF000` (61440), or
-`zcl attr read <addr> 2 0402 0104 f000` on the bench shell.
+manufacturer-coded (read with no manufacturer code) and ZHA/Z2M ignore it during
+interview — it creates no entity.
+
+Reading it: ZHA's stock attribute dropdown only lists attributes **zigpy knows**,
+and 0xF000 isn't one of them (and the field has no free-text entry). Two ways:
+
+- **`zha_quirk_flexitmc.py`** (in this dir) — an **attribute-only** quirk that teaches
+  zigpy about 0xF000 (no entity, no duplicates). Install it (see the file header),
+  then read attribute `endpoint_label` on the endpoint's Temperature Measurement
+  cluster via *Manage Zigbee device*.
+- **zha-toolkit** (HACS) — `zha_toolkit.attr_read` with `cluster: 1026`,
+  `attribute: 61440`, no quirk needed.
+
+On the bench shell it's just `zcl attr read <addr> 2 0402 0104 f000`.
 
 **Fan Control `FanMode` (0x0202 / attr 0x0000, enum8, rw, reportable):**
 
@@ -44,7 +54,9 @@ temperature entities (one generic + one custom). There is no clean, version-stab
 way to suppress the default. So for ZHA just rename the three temperature entities
 in the UI (device → entity → ✏️). Those renames are stored in the entity registry
 by `unique_id` (IEEE + endpoint + cluster), so they **survive restarts and re-pairs**
-(including `zbreset`). A ZHA quirk was tried and removed for this reason.
+(including `zbreset`). A *naming* quirk (one that defines sensor **entities**) was tried
+and removed for this reason. (The `zha_quirk_flexitmc.py` below is a different,
+attribute-only quirk — it adds **no** entity, so it doesn't duplicate anything.)
 
 The `zigbee2mqtt_flexitmc.js` external converter is kept for **Z2M** users (Z2M
 converters replace exposes cleanly, so no duplicate issue there) — still untested.
