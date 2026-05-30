@@ -8,7 +8,6 @@
  * Endpoints:
  *   EP1  Basic + Identify + Fan Control  — current mode (read) + set mode (write)
  *   EP2  Temperature Measurement         — supply air
- *   EP3  Temperature Measurement         — extract air
  *   EP4  Temperature Measurement         — outdoor air
  *
  * Cluster values are fed through the setters below from any thread; they are
@@ -17,11 +16,10 @@
  * synthetic generator; Phase 4 feeds the same setters from the RS485 decode.
  */
 
-/* Temperature channels — index order maps to EP2..EP4 (see zigbee_ep.c). */
+/* Temperature channels — see temp_ep_id[] in zigbee_ep.c for the EP mapping. */
 enum zigbee_temp_channel {
-	ZIGBEE_TEMP_SUPPLY = 0,  /* supply air   */
-	ZIGBEE_TEMP_EXTRACT,     /* extract air  */
-	ZIGBEE_TEMP_OUTDOOR,     /* outdoor air  */
+	ZIGBEE_TEMP_SUPPLY = 0,  /* supply air   (EP2) */
+	ZIGBEE_TEMP_OUTDOOR,     /* outdoor air  (EP4) */
 	ZIGBEE_TEMP_COUNT,
 };
 

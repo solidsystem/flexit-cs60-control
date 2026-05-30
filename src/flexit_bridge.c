@@ -60,15 +60,6 @@ static void bridge_work_fn(struct k_work *work)
 		zigbee_ep_set_temperature(ZIGBEE_TEMP_OUTDOOR,
 			(int16_t)(st.temp_outdoor_air_x10 * 10));
 
-		/* Extract-air sensor may be absent on this install (sentinel on
-		 * the wire). Skip it when not present so zigbee_ep ages it out to
-		 * "unknown" rather than publishing the sentinel as a reading.
-		 */
-		if (st.sensors_present & PANEL_MIRROR_SENSOR_EXTRACT_AIR) {
-			zigbee_ep_set_temperature(ZIGBEE_TEMP_EXTRACT,
-				(int16_t)(st.temp_extract_air_x10 * 10));
-		}
-
 		if (st.mode <= 3) {
 			zigbee_ep_set_mode((uint8_t)st.mode);
 		}

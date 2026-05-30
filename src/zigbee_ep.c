@@ -3,11 +3,10 @@
  * A custom Zigbee end device:
  *   EP1  Basic + Identify + Fan Control (FanMode rw, reportable)
  *   EP2  Temperature Measurement  (supply air)
- *   EP3  Temperature Measurement  (extract air)
  *   EP4  Temperature Measurement  (outdoor air)
- *
+*
  * The endpoints are hand-declared (rather than via a canned HA device-type
- * macro) so EP1 can carry Fan Control and so the three temperature endpoints
+ * macro) so EP1 can carry Fan Control and so the temperature endpoints
  * can share one simple-descriptor type — ZB_DECLARE_SIMPLE_DESC() typedefs a
  * struct keyed by the (in,out) cluster counts, so reusing a canned single-EP
  * macro three times would redefine the same struct.
@@ -42,8 +41,7 @@ LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
 /* --- Endpoint IDs --- */
 #define FLEXIT_CTRL_ENDPOINT      1   /* Basic + Identify + Fan Control */
 #define FLEXIT_TEMP_EP_SUPPLY     2
-#define FLEXIT_TEMP_EP_EXTRACT    3
-#define FLEXIT_TEMP_EP_OUTDOOR    4
+#define FLEXIT_TEMP_EP_OUTDOOR    4   /* EP3 (extract air) removed */
 
 #define FLEXIT_DEVICE_VERSION     0
 #define FLEXIT_INIT_BASIC_POWER_SOURCE  ZB_ZCL_BASIC_POWER_SOURCE_DC_SOURCE
@@ -123,7 +121,6 @@ static bool temp_stale[ZIGBEE_TEMP_COUNT];
 
 static const uint8_t temp_ep_id[ZIGBEE_TEMP_COUNT] = {
 	[ZIGBEE_TEMP_SUPPLY]  = FLEXIT_TEMP_EP_SUPPLY,
-	[ZIGBEE_TEMP_EXTRACT] = FLEXIT_TEMP_EP_EXTRACT,
 	[ZIGBEE_TEMP_OUTDOOR] = FLEXIT_TEMP_EP_OUTDOOR,
 };
 
@@ -191,7 +188,7 @@ ZB_AF_DECLARE_ENDPOINT_DESC(ctrl_ep, FLEXIT_CTRL_ENDPOINT, ZB_AF_HA_PROFILE_ID,
 	(zb_af_simple_desc_1_1_t *)&simple_desc_ctrl, 1, reporting_ctrl, 0, NULL);
 
 /* ------------------------------------------------------------------------- */
-/* EP2..EP4 — Temperature Measurement (one cluster each)                     */
+/* EP2/EP4 — Temperature Measurement (one cluster each)                      */
 /* ------------------------------------------------------------------------- */
 ZB_DECLARE_SIMPLE_DESC(1, 0);
 
@@ -232,10 +229,9 @@ ZB_DECLARE_SIMPLE_DESC(1, 0);
 		ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
 
 FLEXIT_TEMP_EP(supply,  FLEXIT_TEMP_EP_SUPPLY,  "\x06" "supply");
-FLEXIT_TEMP_EP(extract, FLEXIT_TEMP_EP_EXTRACT, "\x07" "extract");
 FLEXIT_TEMP_EP(outdoor, FLEXIT_TEMP_EP_OUTDOOR, "\x07" "outdoor");
 
-ZBOSS_DECLARE_DEVICE_CTX_4_EP(flexit_ctx, ctrl_ep, supply_ep, extract_ep, outdoor_ep);
+ZBOSS_DECLARE_DEVICE_CTX_3_EP(flexit_ctx, ctrl_ep, supply_ep, outdoor_ep);
 
 /* ------------------------------------------------------------------------- */
 /* Attribute init                                                            */
@@ -457,12 +453,11 @@ static void synth_work_fn(struct k_work *work)
 	ARG_UNUSED(work);
 	static uint32_t tick;
 
-	/* Supply air sweeps 18.00 -> 24.00 C; extract trails +2 C; outdoor sweeps
-	 * a colder 5.00 -> 8.00 C — enough movement to exercise reporting.
+	/* Supply air sweeps 18.00 -> 24.00 C; outdoor sweeps a colder
+	 * 5.00 -> 8.00 C — enough movement to exercise reporting.
 	 */
 	int16_t supply = (int16_t)(1800 + (tick % 61) * 10);
 	zigbee_ep_set_temperature(ZIGBEE_TEMP_SUPPLY, supply);
-	zigbee_ep_set_temperature(ZIGBEE_TEMP_EXTRACT, (int16_t)(supply + 200));
 	zigbee_ep_set_temperature(ZIGBEE_TEMP_OUTDOOR, (int16_t)(500 + (tick % 31) * 10));
 
 	/* Cycle Stop/Min/Normal/Max slowly so writes remain observable between. */
@@ -527,11 +522,11 @@ int zigbee_ep_init(void)
 
 #if FLEXIT_SYNTHETIC_DATA
 	k_work_schedule(&synth_work, K_SECONDS(FLEXIT_SYNTH_INTERVAL_S));
-	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d/%d temps, synthetic feed)",
-		FLEXIT_TEMP_EP_SUPPLY, FLEXIT_TEMP_EP_EXTRACT, FLEXIT_TEMP_EP_OUTDOOR);
+	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d temps, synthetic feed)",
+		FLEXIT_TEMP_EP_SUPPLY, FLEXIT_TEMP_EP_OUTDOOR);
 #else
-	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d/%d temps)",
-		FLEXIT_TEMP_EP_SUPPLY, FLEXIT_TEMP_EP_EXTRACT, FLEXIT_TEMP_EP_OUTDOOR);
+	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d temps)",
+		FLEXIT_TEMP_EP_SUPPLY, FLEXIT_TEMP_EP_OUTDOOR);
 #endif
 
 	return 0;
