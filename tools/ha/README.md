@@ -17,6 +17,14 @@ device in HA.
 | 3 | 0x0104 | 0x0302 Temp Sensor | 0x0402 Temperature Measurement | extract air | `sensor` |
 | 4 | 0x0104 | 0x0302 Temp Sensor | 0x0402 Temperature Measurement | outdoor air | `sensor` |
 
+Each Temperature Measurement cluster (EP2/3/4) also carries a custom **read-only
+label attribute `0xF000`** (ZCL character string) returning `supply` / `extract` /
+`outdoor`, so an endpoint can be identified by reading one attribute. It is not
+manufacturer-coded (read it with no manufacturer code) and ZHA/Z2M ignore it during
+interview — it creates no entity. Read it via ZHA → *Manage Zigbee device* → the
+endpoint's Temperature Measurement cluster → read attribute `0xF000` (61440), or
+`zcl attr read <addr> 2 0402 0104 f000` on the bench shell.
+
 **Fan Control `FanMode` (0x0202 / attr 0x0000, enum8, rw, reportable):**
 
 | FanMode | Flexit mode |

@@ -52,6 +52,16 @@ LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
 #define FLEXIT_TEMP_MIN_CC        (-4000)  /* -40.00 C */
 #define FLEXIT_TEMP_MAX_CC        ( 8000)  /*  80.00 C */
 
+/* Custom read-only label attribute added to each Temperature Measurement
+ * cluster: a ZCL character string naming the endpoint ("supply"/"extract"/
+ * "outdoor"). Lets a client identify which physical channel an endpoint is by
+ * reading one attribute (e.g. `zcl attr read <addr> 2 0402 0104 f000`, or ZHA's
+ * "Manage Zigbee device" attribute reader). 0xF000 is in the custom range; it is
+ * not manufacturer-coded, so it reads back without a manufacturer code. ZHA/Z2M
+ * ignore it during interview — it never auto-creates an entity.
+ */
+#define FLEXIT_ATTR_TEMP_LABEL_ID 0xF000
+
 /* How often the ZBOSS-context tick flushes latched values into the clusters. */
 #define FLEXIT_PUBLISH_INTERVAL   (ZB_TIME_ONE_SECOND * 2)
 
@@ -167,13 +177,27 @@ ZB_AF_DECLARE_ENDPOINT_DESC(ctrl_ep, FLEXIT_CTRL_ENDPOINT, ZB_AF_HA_PROFILE_ID,
 /* ------------------------------------------------------------------------- */
 ZB_DECLARE_SIMPLE_DESC(1, 0);
 
-#define FLEXIT_TEMP_EP(name, ep_id)                                              \
+/* `label` is a ZCL character string: a length-prefix byte then the text, the
+ * length byte in its own literal so the next char can't be eaten by the \x
+ * escape (e.g. "\x06" "supply"). See basic_mf_name above for the same idiom.
+ * The attribute list is hand-declared (rather than via
+ * ZB_ZCL_DECLARE_TEMP_MEASUREMENT_ATTRIB_LIST) so it can carry the extra
+ * FLEXIT_ATTR_TEMP_LABEL_ID string alongside the four standard attributes.
+ */
+#define FLEXIT_TEMP_EP(name, ep_id, label)                                       \
 	static zb_int16_t  name##_value = ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_UNKNOWN; \
 	static zb_int16_t  name##_min   = FLEXIT_TEMP_MIN_CC;                         \
 	static zb_int16_t  name##_max   = FLEXIT_TEMP_MAX_CC;                         \
 	static zb_uint16_t name##_tol   = 0;                                         \
-	ZB_ZCL_DECLARE_TEMP_MEASUREMENT_ATTRIB_LIST(name##_attrs, &name##_value,      \
-		&name##_min, &name##_max, &name##_tol);                              \
+	static zb_char_t   name##_label[] = label;                                   \
+	ZB_ZCL_START_DECLARE_ATTRIB_LIST_CLUSTER_REVISION(name##_attrs, ZB_ZCL_TEMP_MEASUREMENT) \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &name##_value)     \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_TEMP_MEASUREMENT_MIN_VALUE_ID, &name##_min)   \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_TEMP_MEASUREMENT_MAX_VALUE_ID, &name##_max)   \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_TEMP_MEASUREMENT_TOLERANCE_ID, &name##_tol)   \
+		ZB_ZCL_SET_ATTR_DESC_M(FLEXIT_ATTR_TEMP_LABEL_ID, name##_label,               \
+			ZB_ZCL_ATTR_TYPE_CHAR_STRING, ZB_ZCL_ATTR_ACCESS_READ_ONLY)          \
+	ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST;                                           \
 	static zb_zcl_cluster_desc_t name##_clusters[] = {                          \
 		ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,             \
 			ZB_ZCL_ARRAY_SIZE(name##_attrs, zb_zcl_attr_t), name##_attrs,  \
@@ -189,9 +213,9 @@ ZB_DECLARE_SIMPLE_DESC(1, 0);
 		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
 		ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
 
-FLEXIT_TEMP_EP(supply,  FLEXIT_TEMP_EP_SUPPLY);
-FLEXIT_TEMP_EP(extract, FLEXIT_TEMP_EP_EXTRACT);
-FLEXIT_TEMP_EP(outdoor, FLEXIT_TEMP_EP_OUTDOOR);
+FLEXIT_TEMP_EP(supply,  FLEXIT_TEMP_EP_SUPPLY,  "\x06" "supply");
+FLEXIT_TEMP_EP(extract, FLEXIT_TEMP_EP_EXTRACT, "\x07" "extract");
+FLEXIT_TEMP_EP(outdoor, FLEXIT_TEMP_EP_OUTDOOR, "\x07" "outdoor");
 
 ZBOSS_DECLARE_DEVICE_CTX_4_EP(flexit_ctx, ctrl_ep, supply_ep, extract_ep, outdoor_ep);
 
