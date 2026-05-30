@@ -20,6 +20,8 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
+#include <zephyr/sys/reboot.h>
 
 #include <zboss_api.h>
 #include <zboss_api_af.h>
@@ -327,6 +329,53 @@ void zigbee_ep_set_mode_write_handler(zigbee_ep_mode_write_cb_t cb)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Factory reset (re-pairing)                                                */
+/*                                                                           */
+/* zb_bdb_reset_via_local_action() leaves the network and wipes the ZBOSS    */
+/* persistent data, then raises ZB_ZDO_SIGNAL_LEAVE. For an end device the   */
+/* default signal handler reacts to that leave with a rejoin attempt, not a  */
+/* fresh steering — so to actually become joinable again we reboot. A boot   */
+/* with cleared NVRAM is a DEVICE_FIRST_START, which the default handler      */
+/* turns into BDB network steering (the join/pairing scan).                  */
+/* ------------------------------------------------------------------------- */
+static atomic_t factory_reset_pending = ATOMIC_INIT(0);
+
+static void reboot_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	LOG_WRN("Zigbee factory reset: rebooting to begin fresh commissioning");
+	sys_reboot(SYS_REBOOT_COLD);
+}
+static K_WORK_DELAYABLE_DEFINE(reboot_work, reboot_work_fn);
+
+void zigbee_ep_factory_reset(void)
+{
+	if (atomic_set(&factory_reset_pending, 1) == 1) {
+		LOG_INF("Zigbee factory reset already in progress");
+		return;
+	}
+
+	LOG_WRN("Zigbee factory reset requested — leaving network and clearing NVRAM");
+
+	/* ZB_SCHEDULE_APP_CALLBACK resolves to the thread-safe
+	 * zigbee_schedule_callback() in the Zephyr build, so this is safe to
+	 * call from the BLE command thread. The reset runs in ZBOSS context.
+	 */
+	zb_ret_t ret = ZB_SCHEDULE_APP_CALLBACK(zb_bdb_reset_via_local_action, 0);
+	if (ret != RET_OK) {
+		LOG_ERR("Failed to schedule Zigbee factory reset (ret %d)", ret);
+		atomic_set(&factory_reset_pending, 0);
+		return;
+	}
+
+	/* Fallback: reboot even if the LEAVE signal never arrives (e.g. the
+	 * device was not joined). The LEAVE handler expedites this once the
+	 * leave is actually processed.
+	 */
+	k_work_reschedule(&reboot_work, K_SECONDS(5));
+}
+
+/* ------------------------------------------------------------------------- */
 /* Synthetic data generator (Phase 2 only)                                   */
 /* ------------------------------------------------------------------------- */
 #if FLEXIT_SYNTHETIC_DATA
@@ -366,6 +415,16 @@ void zboss_signal_handler(zb_bufid_t bufid)
 
 	/* Default handling: join/rejoin, steering, etc. */
 	ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
+
+	/* Once a requested factory reset has produced the network-leave, the
+	 * NVRAM is cleared; reboot promptly so the next boot is a clean
+	 * DEVICE_FIRST_START and steers for a new coordinator. (k_work_reschedule
+	 * shortens the fallback timer armed in zigbee_ep_factory_reset.)
+	 */
+	if (sig == ZB_ZDO_SIGNAL_LEAVE &&
+	    atomic_get(&factory_reset_pending)) {
+		k_work_reschedule(&reboot_work, K_SECONDS(1));
+	}
 
 	/* Once the stack has started, drive the periodic publish tick from the
 	 * ZBOSS thread. Attribute writes before joining are local-only; reports

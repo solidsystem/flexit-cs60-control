@@ -379,6 +379,55 @@ func cmdMode(modeArg string) {
 	}
 }
 
+// cmdZbReset connects, sends "zbreset" over NUS RX, prints the one-line ack,
+// then disconnects. The firmware leaves its Zigbee network, clears NVRAM and
+// reboots a second or so later, so on the next boot it scans for and joins an
+// open coordinator (e.g. open ZHA's "Add device" first). The BLE link drops as
+// the device reboots — that is expected and not an error.
+func cmdZbReset() {
+	sysbus, err := dbus.SystemBus()
+	must("system dbus", err)
+	registerPairingAgent(sysbus)
+
+	device := connectBLE()
+	defer device.Disconnect()
+
+	txChar, rxChar := openNUS(device)
+
+	notifyCh := make(chan []byte, 16)
+	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
+		b := make([]byte, len(buf))
+		copy(b, buf)
+		notifyCh <- b
+	}))
+
+	fmt.Println("Sending \"zbreset\"...")
+	_, werr := rxChar.WriteWithoutResponse([]byte("zbreset"))
+	must("write zbreset", werr)
+
+	var line []byte
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case chunk := <-notifyCh:
+			line = append(line, chunk...)
+			if i := indexByte(line, '\n'); i >= 0 {
+				fmt.Print(string(line[:i+1]))
+				fmt.Println("Device is rebooting to start fresh Zigbee commissioning.")
+				fmt.Println("Make sure ZHA \"Add device\" (permit join) is open so it can pair.")
+				return
+			}
+		case <-deadline:
+			if len(line) > 0 {
+				fmt.Println(strings.TrimRight(string(line), "\r\n"))
+			} else {
+				log.Fatal("Timeout waiting for zbreset ack")
+			}
+			return
+		}
+	}
+}
+
 // formatStateHuman parses the compact one-line firmware state string and
 // prints a verbose, multiline human-readable report to stdout.
 //
@@ -593,11 +642,12 @@ func usage() {
   %s stream <output.bin>   — Stream live RS485 traffic to file (Ctrl-C to stop)
   %s state [--human-friendly]  — Print decoded panel state; --human-friendly for verbose multiline output
   %s mode <0|1|2|3>        — Queue a CMD_MODE change (Stop/Min/Normal/Max)
+  %s zbreset               — Zigbee factory reset: leave network, clear NVRAM, reboot to re-pair
   %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
   %s scan                  — Scan and print RSSI for flexitMC (Ctrl-C to stop)
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -635,6 +685,8 @@ func main() {
 			usage()
 		}
 		cmdMode(os.Args[2])
+	case "zbreset":
+		cmdZbReset()
 	case "list":
 		cmdList()
 	case "scan":

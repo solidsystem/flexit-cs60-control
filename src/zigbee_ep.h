@@ -50,4 +50,17 @@ void zigbee_ep_set_mode(uint8_t flexit_mode);
 /* Register the handler called when a Zigbee client writes FanMode. */
 void zigbee_ep_set_mode_write_handler(zigbee_ep_mode_write_cb_t cb);
 
+/* Perform a Zigbee "factory reset" (BDB reset via local action): leave the
+ * current network, clear ZBOSS persistent data, then reboot. The reboot is
+ * what makes the device joinable again — a clean NVRAM boots as
+ * DEVICE_FIRST_START, which auto-starts BDB network steering, whereas a plain
+ * reboot with stored network state only rejoins the old network.
+ *
+ * Use this to re-pair with a different coordinator (e.g. move from the test
+ * coordinator to Home Assistant/ZHA). Thread-safe; may be called from any
+ * thread (e.g. the BLE command handler). The call returns immediately; the
+ * device reboots a second or so later once the leave has been processed.
+ */
+void zigbee_ep_factory_reset(void);
+
 #endif /* ZIGBEE_EP_H */

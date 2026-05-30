@@ -120,6 +120,14 @@ go build -o ble-client .
 # slave address (i.e. present and responding when CS60 last booted).
 ./ble-client mode 1
 
+# Zigbee factory reset — leave the current network, clear ZBOSS NVRAM, and
+# reboot. A clean NVRAM boots as DEVICE_FIRST_START, which auto-starts BDB
+# network steering, so the XIAO becomes joinable again. Use this to re-pair
+# with a new coordinator (e.g. move from the test coordinator to HA/ZHA):
+# open ZHA "Add device" (permit join) first, then run this. The BLE link drops
+# as the device reboots (~1-5 s) — expected.
+./ble-client zbreset
+
 # Scan and print RSSI (useful to check signal before flashing)
 ./ble-client scan
 

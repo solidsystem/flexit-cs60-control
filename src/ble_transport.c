@@ -1,6 +1,7 @@
 #include "ble_transport.h"
 #include "flexit_slave.h"
 #include "panel_mirror.h"
+#include "zigbee_ep.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -338,6 +339,10 @@ static size_t format_state_line(char *buf, size_t cap)
  *   "state"   — single-line snapshot of the decoded panel mirror
  *   "mode N"  — queue a CMD_MODE change (N = 0..3) on the Modbus slave;
  *               echoes "mode: queued=N" or "mode: bad arg" on NUS TX
+ *   "zbreset" — Zigbee factory reset: leave the network, clear NVRAM and
+ *               reboot so the device steers for a new coordinator on next
+ *               boot. Echoes an ack on NUS TX, then the BLE link drops as the
+ *               device reboots (~1-5 s later).
  * ---------------------------------------------------------------------------
  */
 static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len)
@@ -359,6 +364,16 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
     } else if (len >= 4 && memcmp(data, "stop", 4) == 0) {
         printk("stream: stopped\n");
         atomic_set(&stream_active, 0);
+
+    } else if (len >= 7 && memcmp(data, "zbreset", 7) == 0) {
+        /* Ack before triggering: zigbee_ep_factory_reset() reboots the device
+         * shortly after, which tears down this BLE link.
+         */
+        static const char reply[] =
+            "zbreset: leaving Zigbee network, clearing NVRAM, rebooting\n";
+        (void)bt_nus_send(conn, (const uint8_t *)reply, sizeof(reply) - 1);
+        printk("zbreset: triggering Zigbee factory reset\n");
+        zigbee_ep_factory_reset();
 
     } else if (len >= 4 && memcmp(data, "mode", 4) == 0) {
         /* Parse the rest of the payload as a decimal integer 0..3. */
