@@ -166,8 +166,9 @@ synthetic feeds for real data). Verified over the air against the `tools/zb-shel
       ZBOSS only reports to **bound** destinations, so the binding is required — ZHA/Z2M create it
       automatically; the bench `zcl subscribe` alone does not.
 
-### Phase 3 — Home Assistant pairing (needs a ZHA/Z2M coordinator; no BLE / no CS60 needed)
-Prep done off-HA (2026-05-30); the remaining items need a live ZHA/Z2M coordinator in HA.
+### Phase 3 — Home Assistant pairing (needs a ZHA/Z2M coordinator; no BLE / no CS60 needed) ✅ DONE (2026-05-30)
+Verified on real HA (ZHA, HA 2026.4.x): the XIAO pairs and auto-discovers one fan + three
+temperature sensors. Re-pairing uses `zbreset` (`ble-client zbreset`) with ZHA permit-join open.
 - [x] Device identity: added ManufacturerName `SolidSystem` + ModelIdentifier `flexitMC` to the
       Basic cluster (read back over the air) so HA names the device and Z2M can match a converter.
 - [x] Authored `tools/ha/` artifacts: a ZHA v2 quirk (`zha_quirk_flexitmc.py`, friendly
@@ -175,10 +176,12 @@ Prep done off-HA (2026-05-30); the remaining items need a live ZHA/Z2M coordinat
       `README.md` runbook with the exact Zigbee signature. **Untested** against a live HA/Z2M.
 - [x] Live attribute reporting — proven at the protocol level via the bench shell (see Phase 2);
       ZHA/Z2M will set up the same binding automatically.
-- [ ] Pair the device to ZHA (or Z2M) on real HA hardware; verify the auto-discovered entities
+- [x] Pair the device to ZHA (or Z2M) on real HA hardware; verify the auto-discovered entities
       (one device: a fan + three temperature sensors) and that reads/writes/reports work in the UI.
-- [ ] Validate / tweak the quirk + converter against your ZHA (zigpy) and Z2M versions; add the
-      friendly temp names (or just rename in the HA UI).
+- [x] Friendly temp names done by **UI rename** (ZHA, HA 2026.4.x). The v2 `QuirkBuilder` quirk
+      was dropped — it only *adds* a sensor (doesn't replace ZHA's default), so it produced
+      duplicate temperature entities. UI renames persist by `unique_id`, surviving re-pairs. The
+      Z2M `external_converters` file remains untested. See `tools/ha/README.md`.
 
 ### Phase 4 — RS485 integration (needs the CS60 bus reconnected)
 - [ ] Wire Temperature `MeasuredValue` from the real RS485 state decode (shared core) — replaces

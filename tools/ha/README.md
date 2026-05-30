@@ -26,16 +26,27 @@ device in HA.
 | 2 Medium | Normal |
 | 3 High   | Max    |
 
-Without any quirk/converter the device already works: ZHA exposes one `fan` +
-three `temperature` sensors (named generically "Temperature", "Temperature 2/3").
-The quirk/converter here only add the friendly **supply/extract/outdoor** names.
+The device works with no quirk/converter: ZHA exposes one `fan` + three
+`temperature` sensors (named generically "Temperature", "Temperature 2/3").
+
+**ZHA — rename in the UI, do not use a quirk.** Every entity here is a *standard*
+cluster sensor. A zigpy v2 `QuirkBuilder.sensor()` only *adds* an entity; it does
+not replace ZHA's auto-created one, so a naming quirk produces **duplicate**
+temperature entities (one generic + one custom). There is no clean, version-stable
+way to suppress the default. So for ZHA just rename the three temperature entities
+in the UI (device → entity → ✏️). Those renames are stored in the entity registry
+by `unique_id` (IEEE + endpoint + cluster), so they **survive restarts and re-pairs**
+(including `zbreset`). A ZHA quirk was tried and removed for this reason.
+
+The `zigbee2mqtt_flexitmc.js` external converter is kept for **Z2M** users (Z2M
+converters replace exposes cleanly, so no duplicate issue there) — still untested.
 
 ## Expected entities (one device)
 
 - `fan.flexitmc_*` — Off / Low / Medium / High (→ Stop / Min / Normal / Max)
-- `sensor.flexitmc_supply_air_temperature`
-- `sensor.flexitmc_extract_air_temperature`
-- `sensor.flexitmc_outdoor_air_temperature`
+- three `sensor.flexitmc_temperature*` on endpoints 2/3/4 — supply / extract /
+  outdoor air. ZHA names them generically; rename in the UI to taste (the
+  endpoint→meaning mapping is the table above: EP2 supply, EP3 extract, EP4 outdoor).
 
 ## Pairing & validation runbook
 
@@ -54,8 +65,8 @@ Steps:
    the XIAO so it joins the ZHA/Z2M network (it multi-channel scans, so no fixed
    channel is needed). NOTE: joining a new coordinator means leaving the bench
    `0x4716` network; factory-reset the XIAO's Zigbee state if it won't re-steer.
-3. ZHA: drop `zha_quirk_flexitmc.py` into your `zha_quirks`/custom-quirks path.
-   Z2M: point `external_converters` at `zigbee2mqtt_flexitmc.js`.
+3. ZHA: nothing to install — just rename the three temperature entities in the
+   UI (see above). Z2M: point `external_converters` at `zigbee2mqtt_flexitmc.js`.
 4. Confirm the device shows one card with the fan + three temperature sensors,
    that reads work, that setting the fan changes mode, and that temperatures
    update via **reporting** (ZHA/Z2M bind the clusters automatically — that
@@ -66,5 +77,9 @@ Steps:
 
 The protocol-level data path is already verified with `tools/zb-shell`:
 reads, a `FanMode` write, and — after a manual `zdo bind` — live attribute
-reports. ZHA/Z2M automate that binding. These two files are **untested against a
-live HA/Z2M** and may need small tweaks for your exact ZHA (zigpy) / Z2M version.
+reports. ZHA/Z2M automate that binding.
+
+ZHA pairing is **verified on real HA** (2026-05-30, HA 2026.4.x): the device joins
+and auto-discovers one fan + three temperature sensors; friendly names done by UI
+rename. The `zigbee2mqtt_flexitmc.js` converter remains **untested against a live
+Z2M** and may need tweaks for your Z2M version.
