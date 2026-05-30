@@ -10,7 +10,7 @@ Expose the CS60's state to Home Assistant as entities so the ventilation system 
 be monitored and controlled from HA dashboards and automations. Initial scope is
 deliberately small (see [Zigbee scope](#zigbee-scope--data-model)):
 
-- **Read-only:** temperature readings and current mode.
+- **Read-only:** temperature readings, current mode, and heat-exchanger / heating modulation (%).
 - **Writable:** mode only (Stop / Min / Normal / Max).
 
 ```
@@ -37,16 +37,19 @@ changes (see `flexit-cs60-communication.md` and `tools/ble-client`).
 
 ## Zigbee clusters / endpoints
 
-Zigbee's Temperature Measurement cluster carries a single value, so each temperature
-needs its own endpoint. Layout:
+Zigbee's Temperature Measurement and Analog Input clusters each carry a single
+value, so every temperature and percentage needs its own endpoint. Layout:
 
 | Endpoint | Cluster | Dir | Maps to | HA entity |
 |----------|---------|-----|---------|-----------|
 | EP1 | Basic (0x0000), Identify (0x0003) | server | device id / mfg / model | (device info) |
 | EP1 | **Fan Control (0x0202)** — `FanMode` (rw, enum8) | server | **current mode (read) + set mode (write)** | fan / select |
-| EP2 | **Temperature Measurement (0x0402)** — `MeasuredValue` (r, int16, 0.01 °C) | server | temp sensor #1 | sensor |
-| EP3 | Temperature Measurement (0x0402) | server | temp sensor #2 | sensor |
-| EP4… | Temperature Measurement (0x0402) | server | further temps as needed | sensor |
+| EP2 | **Temperature Measurement (0x0402)** — `MeasuredValue` (r, int16, 0.01 °C) | server | supply air temp | sensor |
+| EP4 | Temperature Measurement (0x0402) | server | outdoor air temp | sensor |
+| EP5 | **Analog Input (0x000C)** — `PresentValue` (r, single/float, %) | server | heat-exchanger modulation | sensor (ZHA needs quirk) |
+| EP6 | Analog Input (0x000C) — `PresentValue` (r, single/float, %) | server | heating output | sensor (ZHA needs quirk) |
+
+EP3 (originally extract-air temperature) was removed; endpoint IDs are not renumbered.
 
 **Mode mapping** (Flexit ↔ Fan Control `FanMode`):
 
@@ -62,10 +65,30 @@ needs its own endpoint. Layout:
 - Fan Control is a standard HVAC cluster that ZHA/Z2M expose natively, so this gives a
   real fan/preset entity with little or no custom converter.
 
+### Analog Input percentages (EP5/EP6)
+
+`PCT_HEAT_EXCHANGER` and `PCT_HEATING` (CS60 regs `0x00C8` / `0x00C9`) are exposed as two
+**Analog Input (Basic) `0x000C`** endpoints, one per value, carrying `PresentValue` (float)
+with `EngineeringUnits = 98` (percent). Analog Input is the only standard ZCL cluster for a
+generic read-only number — there is no percentage-specific cluster (Fan Control is taken for
+mode, and the measurement clusters are each tied to a physical quantity).
+
+ZBOSS does **not** compile the Analog Input server by default (its "include all clusters" set
+in `zb_vendor.h` omits it), so the firmware defines `ZB_ZCL_SUPPORT_CLUSTER_ANALOG_INPUT`
+image-wide in `CMakeLists.txt` to pull the cluster source in.
+
+**ZHA caveat:** ZHA does *not* auto-create an entity from a generic Analog Input cluster (its
+built-in handling is gated to specific manufacturers). The interview shows EP5/EP6, but no
+sensor appears until you install the quirk in `tools/zha-quirk/flexitmc.py` — a zigpy v2
+`QuirkBuilder` matching `SolidSystem`/`flexitMC` that exposes both `PresentValue`s as `%`
+sensors. (Z2M would instead need an external converter.)
+
 ### Attribute reporting
 
-Configure reporting on `MeasuredValue` and `FanMode` (min/max interval + reportable
-change) so HA receives push updates instead of polling.
+Configure reporting on `MeasuredValue` (temps), `FanMode` (mode), and `PresentValue` (the
+EP5/EP6 percentages) — min/max interval + reportable change — so HA receives push updates
+instead of polling. For the quirk-defined Analog Input sensors, ZHA sets this up from the
+`reporting_config` in `tools/zha-quirk/flexitmc.py`.
 
 ---
 
@@ -100,8 +123,9 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
 - **Data source stale** (XIAO online on Zigbee, but the RS485/CS60 bus has gone silent): each
   temperature channel publishes the ZCL invalid sentinel `0x8000` after 60 s
   (`FLEXIT_TEMP_STALE_MS`) of no fresh reading, so HA shows those sensors as *unknown* rather than a
-  frozen value. They recover to live readings automatically when the bus resumes. FanMode has no
-  ZCL invalid value, so a stale mode holds its last-known reading.
+  frozen value. They recover to live readings automatically when the bus resumes. FanMode and the
+  EP5/EP6 Analog Input percentages have no ZCL invalid value, so a stale mode/percentage holds its
+  last-known reading.
 
 ---
 
@@ -109,6 +133,9 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
 
 - `flexit-cs60-communication.md` — reverse-engineered RS485/Modbus protocol.
 - `tools/ble-client` — existing BLE tooling (stream/state/mode/flash).
+- `tools/zha-quirk/flexitmc.py` — ZHA v2 quirk exposing the EP5/EP6 Analog Input percentages as
+  `%` sensors (ZHA ignores generic Analog Input clusters otherwise). Drop into HA's
+  `custom_quirks_path`; install notes are in the file's docstring.
 - `tools/zb-coordinator` — test Zigbee coordinator (ncs-zigbee `network_coordinator` + a static
   PM file) for the nrf52840dk; used to verify the end-device join. Build with
   `-DZEPHYR_EXTRA_MODULES=$HOME/ncs/v3.3.0/ncs-zigbee` (after `--`), flash with `west flash`.

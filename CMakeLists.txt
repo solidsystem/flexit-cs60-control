@@ -12,6 +12,13 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(flexitMC)
 
+# ZBOSS's built-in "include all ZCL clusters" set (ncs-zigbee zb_vendor.h) omits
+# Analog Input, so its server (zcl_analog_input.c) is not compiled and its
+# init_server symbol is missing at link. Define the support flag image-wide so
+# the cluster source is built and the API header is pulled in. Used by the
+# percentage Analog Input endpoints (EP5/EP6) in src/zigbee_ep.c.
+zephyr_compile_definitions(ZB_ZCL_SUPPORT_CLUSTER_ANALOG_INPUT)
+
 target_sources(app PRIVATE
     src/main.c
     src/ble_transport.c
