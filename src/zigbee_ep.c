@@ -78,9 +78,9 @@ LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
 
 /* Phase 2: synthesise cluster values so the data path is verifiable with no
  * CS60/RS485 bus connected. Phase 5 sets this to 0 and feeds the setters from
- * the RS485 decode instead.
+ * the RS485 decode instead (src/flexit_bridge.c).
  */
-#define FLEXIT_SYNTHETIC_DATA     1
+#define FLEXIT_SYNTHETIC_DATA     0
 #define FLEXIT_SYNTH_INTERVAL_S   5
 
 /* FanMode enum is identical to the Flexit mode numbering for 0..3:

@@ -118,9 +118,11 @@ change) so HA receives push updates instead of polling.
 Network join (2026-05-29, Phase 1), the Zigbee data model with attribute reporting (2026-05-30,
 Phase 2, bench coordinator), HA/ZHA pairing + auto-discovered entities (2026-05-30, Phase 3), and
 BLE NUS + SMP DFU while joined to the Zigbee mesh, incl. a full over-the-air DFU + auto-rejoin
-(2026-05-30, Phase 4) are all **verified**. Still unverified: real mode/temperature round-trips
-over the RS485 bus (Phase 5) — to be verified manually from the connected HA instance, since RS485
-and USB cannot be connected at once.
+(2026-05-30, Phase 4) are all **verified**. Phase 5 (`src/flexit_bridge.c`, real RS485 feed +
+FanMode write injection) is **verified** (2026-05-30): the RS485 decode is live (supply 19.5 °C,
+outdoor 13.9 °C, mode Min, FC10 frames 118, 0 CRC errors) and the full round-trip was confirmed from
+the connected HA (ZHA) instance — temperatures and fan mode read correctly, and setting the mode from
+HA drives the CS60. All phases are now verified.
 
 ## TODO
 
@@ -216,12 +218,22 @@ happens first, then USB comes out for Phase 5.
 ### Phase 5 — RS485 integration (needs the CS60 bus reconnected; USB disconnected, last)
 The RS485 bus and USB are mutually exclusive on the bench, so this runs last with USB unplugged.
 Zigbee end-to-end is therefore verified **manually from the connected HA (ZHA) instance**.
-- [ ] Wire Temperature `MeasuredValue` from the real RS485 state decode (shared core) — replaces
-      the Phase 2 synthetic feed.
-- [ ] Wire Fan Control `FanMode`: read current mode; on write, trigger the real `CMD_MODE`
-      injection — replaces the Phase 2 stub sink.
-- [ ] Confirm RS485 decode populates `state` once the CS60 bus is reconnected.
-- [ ] End-to-end: set mode from HA (ZHA) → CS60 reacts; CS60 temps change → seen over Zigbee in HA.
+- [x] Wire Temperature `MeasuredValue` from the real RS485 state decode — `src/flexit_bridge.c`
+      polls `panel_mirror_snapshot()` every 2 s and pushes supply/outdoor (and extract when the
+      sensor is present) into `zigbee_ep_set_temperature()`, converting the panel's ×10 °C to ZCL's
+      ×100 centi-°C. Replaces the Phase 2 synthetic feed (`FLEXIT_SYNTHETIC_DATA` now 0).
+- [x] Wire Fan Control `FanMode`: read current mode (`zigbee_ep_set_mode(st.mode)` from the same
+      poll) and, on write, `zigbee_ep_set_mode_write_handler()` → `flexit_slave_queue_mode()` —
+      the real `CMD_MODE` injection (same path as `ble-client mode N`). Replaces the Phase 2 stub.
+- [x] Confirm RS485 decode populates `state` once the CS60 bus is reconnected. ✅ 2026-05-30, read
+      over BLE NUS (`ble-client state`): Mode 1 (Min), supply 19.5 °C, outdoor 13.9 °C, extract n/a
+      (sensor absent → bridge skips it, HA shows *unknown*), FC10 frames 118, CRC errors 0.
+- [x] End-to-end **read** in HA (ZHA), 2026-05-30: after a `zbreset` re-pair the device joined and
+      auto-discovered as one device (fan + 3 temps); supply/outdoor sensors show the expected live
+      temperatures and the fan entity shows the correct CS60 mode. Extract reads *unknown* (sensor
+      absent on this install), as designed.
+- [x] End-to-end **write** in HA (ZHA), 2026-05-30: setting the fan mode from HA drives the CS60 —
+      the FanMode-write → `flexit_slave_queue_mode` → `CMD_MODE` injection path, confirmed in the UI.
 
 ---
 

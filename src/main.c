@@ -3,6 +3,7 @@
 #include <zephyr/sys/printk.h>
 
 #include "ble_transport.h"
+#include "flexit_bridge.h"
 #include "flexit_slave.h"
 #include "rs485_uart.h"
 #include "zigbee_ep.h"
@@ -30,6 +31,8 @@ int main(void)
     if (zigbee_ep_init() < 0) {
         printk("warning: Zigbee init failed — continuing with BLE only\n");
     }
+
+    (void)flexit_bridge_init();
 
     while (true) {
         gpio_pin_toggle_dt(&green_led);

@@ -15,6 +15,7 @@ project(flexitMC)
 target_sources(app PRIVATE
     src/main.c
     src/ble_transport.c
+    src/flexit_bridge.c
     src/flexit_slave.c
     src/panel_mirror.c
     src/rs485_uart.c
