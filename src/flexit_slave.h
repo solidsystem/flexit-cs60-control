@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Phase 2 — Modbus slave for the Flexit CL60/CS60 bus.
+/* Modbus slave for the Flexit CL60/CS60 bus.
  *
  * Lives at slave address 3, owns a coil table, a holding-register table,
  * and an input-register table. To request a mode change we set both

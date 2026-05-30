@@ -1,4 +1,4 @@
-/* Zigbee data model for the flexitMC bridge — Phase 2.
+/* Zigbee data model for the flexitMC bridge.
  *
  * A custom Zigbee end device:
  *   EP1  Basic + Identify + Fan Control (FanMode rw, reportable)
@@ -63,23 +63,15 @@ LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
 /* How often the ZBOSS-context tick flushes latched values into the clusters. */
 #define FLEXIT_PUBLISH_INTERVAL   (ZB_TIME_ONE_SECOND * 2)
 
-/* Stale-data guard (Phase 4): if the source feeding a temperature channel goes
+/* Stale-data guard: if the source feeding a temperature channel goes
  * silent for longer than this, publish the ZCL "invalid" sentinel (0x8000) so
  * HA shows the sensor as *unknown* rather than a frozen last reading. The
- * real RS485 FC10 panel broadcast (Phase 5) refreshes well inside this window;
- * the synthetic feed (every FLEXIT_SYNTH_INTERVAL_S) does too, so live entities
- * are unaffected — only an actual source dropout trips it. Tune if the bus is
- * slower than expected. Whole-device drop (bridge/mesh down) is handled
+ * real RS485 FC10 panel broadcast refreshes well inside this window, so live
+ * entities are unaffected — only an actual source dropout trips it. Tune if
+ * the bus is slower than expected. Whole-device drop (bridge/mesh down) is handled
  * separately by ZHA's own availability tracking — see smarthouse-integration.md.
  */
 #define FLEXIT_TEMP_STALE_MS      60000
-
-/* Phase 2: synthesise cluster values so the data path is verifiable with no
- * CS60/RS485 bus connected. Phase 5 sets this to 0 and feeds the setters from
- * the RS485 decode instead (src/flexit_bridge.c).
- */
-#define FLEXIT_SYNTHETIC_DATA     0
-#define FLEXIT_SYNTH_INTERVAL_S   5
 
 /* FanMode enum is identical to the Flexit mode numbering for 0..3:
  *   Off(0)=Stop  Low(1)=Min  Medium(2)=Normal  High(3)=Max
@@ -442,33 +434,6 @@ void zigbee_ep_factory_reset(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Synthetic data generator (Phase 2 only)                                   */
-/* ------------------------------------------------------------------------- */
-#if FLEXIT_SYNTHETIC_DATA
-static void synth_work_fn(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(synth_work, synth_work_fn);
-
-static void synth_work_fn(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	static uint32_t tick;
-
-	/* Supply air sweeps 18.00 -> 24.00 C; outdoor sweeps a colder
-	 * 5.00 -> 8.00 C — enough movement to exercise reporting.
-	 */
-	int16_t supply = (int16_t)(1800 + (tick % 61) * 10);
-	zigbee_ep_set_temperature(ZIGBEE_TEMP_SUPPLY, supply);
-	zigbee_ep_set_temperature(ZIGBEE_TEMP_OUTDOOR, (int16_t)(500 + (tick % 31) * 10));
-
-	/* Cycle Stop/Min/Normal/Max slowly so writes remain observable between. */
-	zigbee_ep_set_mode((uint8_t)((tick / 6) % 4));
-
-	tick++;
-	k_work_reschedule(&synth_work, K_SECONDS(FLEXIT_SYNTH_INTERVAL_S));
-}
-#endif /* FLEXIT_SYNTHETIC_DATA */
-
-/* ------------------------------------------------------------------------- */
 /* ZBOSS signal handling                                                     */
 /* ------------------------------------------------------------------------- */
 void zboss_signal_handler(zb_bufid_t bufid)
@@ -520,14 +485,8 @@ int zigbee_ep_init(void)
 
 	zigbee_enable();
 
-#if FLEXIT_SYNTHETIC_DATA
-	k_work_schedule(&synth_work, K_SECONDS(FLEXIT_SYNTH_INTERVAL_S));
-	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d temps, synthetic feed)",
-		FLEXIT_TEMP_EP_SUPPLY, FLEXIT_TEMP_EP_OUTDOOR);
-#else
 	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d temps)",
 		FLEXIT_TEMP_EP_SUPPLY, FLEXIT_TEMP_EP_OUTDOOR);
-#endif
 
 	return 0;
 }

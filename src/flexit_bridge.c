@@ -1,4 +1,4 @@
-/* Phase 5 — bridge the RS485 panel mirror to the Zigbee data model.
+/* Bridge the RS485 panel mirror to the Zigbee data model.
  *
  * RS485 (CS60) ── panel_mirror ──┐
  *                                 ├─► zigbee_ep setters (temps + mode)

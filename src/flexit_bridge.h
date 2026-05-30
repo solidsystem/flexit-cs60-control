@@ -1,10 +1,10 @@
 #ifndef FLEXITMC_FLEXIT_BRIDGE_H_
 #define FLEXITMC_FLEXIT_BRIDGE_H_
 
-/* Phase 5 — glue between the RS485 panel mirror and the Zigbee data model.
+/* Glue between the RS485 panel mirror and the Zigbee data model.
  *
- * Replaces the Phase 2 synthetic feed in zigbee_ep.c with real CS60 data:
- *   - periodically snapshots panel_mirror and pushes supply/extract/outdoor
+ * Feeds the zigbee_ep setters with real CS60 data:
+ *   - periodically snapshots panel_mirror and pushes supply/outdoor
  *     temperatures and the current mode into the zigbee_ep setters;
  *   - registers the FanMode-write handler so a Zigbee client writing FanMode
  *     injects a real CMD_MODE via flexit_slave_queue_mode().

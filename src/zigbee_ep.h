@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* Zigbee data model for the flexitMC bridge (smarthouse-integration.md Phase 2).
+/* Zigbee data model for the flexitMC bridge (see smarthouse-integration.md).
  *
  * Endpoints:
  *   EP1  Basic + Identify + Fan Control  — current mode (read) + set mode (write)
@@ -12,8 +12,8 @@
  *
  * Cluster values are fed through the setters below from any thread; they are
  * latched and pushed into the ZCL attributes from the Zigbee stack thread
- * (attribute writes must happen in ZBOSS context). Phase 2 drives them with a
- * synthetic generator; Phase 4 feeds the same setters from the RS485 decode.
+ * (attribute writes must happen in ZBOSS context). The setters are driven from
+ * the RS485 decode (src/flexit_bridge.c).
  */
 
 /* Temperature channels — see temp_ep_id[] in zigbee_ep.c for the EP mapping. */
@@ -25,8 +25,8 @@ enum zigbee_temp_channel {
 
 /* Invoked (in a Zephyr thread context, from the ZBOSS stack thread) when a
  * Zigbee client writes Fan Control FanMode. `flexit_mode` is 0..3
- * (Stop/Min/Normal/Max). Phase 4 points this at flexit_slave_queue_mode(); if
- * left unset, zigbee_ep logs the request as a stub CMD_MODE sink (Phase 2).
+ * (Stop/Min/Normal/Max). flexit_bridge points this at flexit_slave_queue_mode();
+ * if left unset, zigbee_ep logs the request as a stub CMD_MODE sink.
  */
 typedef void (*zigbee_ep_mode_write_cb_t)(uint8_t flexit_mode);
 
