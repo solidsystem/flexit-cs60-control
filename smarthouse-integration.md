@@ -38,7 +38,7 @@ changes (see `flexit-cs60-communication.md` and `tools/ble-client`).
 ## Zigbee clusters / endpoints
 
 Zigbee's Temperature Measurement cluster carries a single value, so each temperature
-needs its **own endpoint**. Proposed layout:
+needs its own endpoint. Layout:
 
 | Endpoint | Cluster | Dir | Maps to | HA entity |
 |----------|---------|-----|---------|-----------|
@@ -116,5 +116,5 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
   coordinator runs (restore with `west flash --build-dir build-hci-usb`).
 - `tools/zb-shell` — ZCL-capable bench coordinator (ncs-zigbee `shell` sample + static PM) for the
   nrf52840dk. Resumes the persisted network from NVRAM (`bdb role zc` / `bdb start`); drive ZCL over
-  `/dev/ttyACM0` (`zcl attr read/write`, `zdo bind`, `zcl subscribe`). Used to verify Phase 2/3.
+  `/dev/ttyACM0` (`zcl attr read/write`, `zdo bind`, `zcl subscribe`). 
 - HA ZHA integration: https://www.home-assistant.io/integrations/zha/
