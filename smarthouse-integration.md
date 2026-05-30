@@ -115,16 +115,21 @@ change) so HA receives push updates instead of polling.
 
 ## Open questions / risks
 
-Network join is **verified** (2026-05-29, see Phase 1). Still unverified: mode/temperature
-round-trips (Phase 2 data model not yet wired) and a BLE DFU performed while joined to the
-Zigbee mesh.
+Network join (2026-05-29, Phase 1), the Zigbee data model with attribute reporting (2026-05-30,
+Phase 2, bench coordinator), HA/ZHA pairing + auto-discovered entities (2026-05-30, Phase 3), and
+BLE NUS + SMP DFU while joined to the Zigbee mesh, incl. a full over-the-air DFU + auto-rejoin
+(2026-05-30, Phase 4) are all **verified**. Still unverified: real mode/temperature round-trips
+over the RS485 bus (Phase 5) — to be verified manually from the connected HA instance, since RS485
+and USB cannot be connected at once.
 
 ## TODO
 
-Ordered by dependency: everything that runs on the **current bench** (the `tools/zb-coordinator`
-test coordinator is up; the `hci_usb` BLE adapter and the CS60/RS485 bus are **disconnected**)
-comes first, so all the Zigbee work is finished before the steps that need BLE or RS485 wired
-back in. Phases 2–3 need neither; Phase 4 needs the CS60 bus; Phase 5 needs the BLE adapter.
+Ordered by dependency and by a **bench constraint**: the RS485 bus cannot be connected while
+the XIAO's USB is connected, so all the USB/BLE-dependent work is done first, then USB is
+unplugged and the CS60/RS485 bus is wired in last. Phases 2–3 need neither bus. Phase 4 (BLE
+service-port) needs the `hci_usb` adapter and USB. Phase 5 (RS485) needs the CS60 bus and runs
+last, with USB disconnected. Zigbee end-to-end behaviour in Phase 5 is verified **manually from
+the connected Home Assistant (ZHA) instance**, not the bench coordinator.
 
 ### Phase 1 — Firmware: dual-protocol skeleton ✅ DONE
 - [x] Register `ncs-zigbee` (commit `8a6c6ca`) so PM discovers the ZBOSS partitions
@@ -183,21 +188,93 @@ temperature sensors. Re-pairing uses `zbreset` (`ble-client zbreset`) with ZHA p
       duplicate temperature entities. UI renames persist by `unique_id`, surviving re-pairs. The
       Z2M `external_converters` file remains untested. See `tools/ha/README.md`.
 
-### Phase 4 — RS485 integration (needs the CS60 bus reconnected)
+### Phase 4 — BLE service-port + hardening ✅ DONE (2026-05-30)
+The `hci_usb` adapter on the DK was already restored (the test coordinator torn down), so the XIAO
+was joined only to the **real HA (ZHA)** network from Phase 3 throughout. Verified on the bench with
+`tools/ble-client` over the `hci0` adapter while the device stayed joined to ZHA. Done **before**
+RS485 because the RS485 bus cannot be connected while USB is plugged in — so all USB/BLE work
+happens first, then USB comes out for Phase 5.
+- [x] **(runtime)** BLE NUS + SMP DFU work while Zigbee is joined. All three BLE surfaces exercised
+      against the joined device: advertising (`scan`, RSSI ≈ -56 dBm), SMP (`list`), NUS (`state`).
+- [x] DFU over BLE while live on the Zigbee network. A full 500 KB SMP image upload
+      (`ble-client flash`, ATT MTU 498) ran to completion **while the XIAO stayed joined to ZHA**,
+      then test-mark → reset → `confirm`. Post-reboot the new image is `active+confirmed` in slot 0
+      (old image retained in slot 1 for rollback) and all three BLE surfaces work on it; the device
+      **auto-rejoined ZHA** (boots as `DEVICE_REBOOT`, NVRAM intact) with fan + 3 temp entities live
+      — confirmed in HA.
+- [x] Availability / stale-data handling. **Bridge/mesh drop** (whole device offline) is handled by
+      ZHA's native availability tracking — a mains-powered (rx-on) device that stops answering ZHA's
+      periodic checkins is marked *unavailable*; nothing extra needed firmware-side. **Source-stale**
+      (RS485 silent but the Zigbee link is fine) is handled in firmware: each temperature channel
+      tracks its last-update time and, after `FLEXIT_TEMP_STALE_MS` (60 s) of silence, publishes the
+      ZCL invalid sentinel `0x8000` so HA shows *unknown* instead of a frozen reading
+      (`src/zigbee_ep.c` `publish_tick`). The synthetic feed (5 s) and the real FC10 broadcast both
+      refresh well inside the window, so live entities are unaffected — only an actual dropout trips
+      it. FanMode has no ZCL "invalid" value, so a stale mode holds its last reading (documented).
+- [x] Operational runbook — see [Operational runbook](#operational-runbook) below.
+
+### Phase 5 — RS485 integration (needs the CS60 bus reconnected; USB disconnected, last)
+The RS485 bus and USB are mutually exclusive on the bench, so this runs last with USB unplugged.
+Zigbee end-to-end is therefore verified **manually from the connected HA (ZHA) instance**.
 - [ ] Wire Temperature `MeasuredValue` from the real RS485 state decode (shared core) — replaces
       the Phase 2 synthetic feed.
 - [ ] Wire Fan Control `FanMode`: read current mode; on write, trigger the real `CMD_MODE`
       injection — replaces the Phase 2 stub sink.
 - [ ] Confirm RS485 decode populates `state` once the CS60 bus is reconnected.
-- [ ] End-to-end: set mode over Zigbee → CS60 reacts; CS60 temps change → seen over Zigbee and in HA.
+- [ ] End-to-end: set mode from HA (ZHA) → CS60 reacts; CS60 temps change → seen over Zigbee in HA.
 
-### Phase 5 — BLE service-port + hardening (needs the `hci_usb` adapter restored)
-Reflash `hci_usb` to the DK (`west flash --build-dir build-hci-usb`); this tears down the test
-coordinator, so run these only after the Zigbee/RS485 work above is complete.
-- [ ] **(runtime)** Confirm BLE NUS + SMP DFU still work while Zigbee is joined.
-- [ ] Confirm DFU over BLE while the device is live on the Zigbee network.
-- [ ] Availability / stale-data handling in HA when the bridge or mesh drops.
-- [ ] Document the operational runbook (join, re-join after DFU, debug via BLE).
+---
+
+## Operational runbook
+
+Day-to-day operation of the deployed bridge. The XIAO runs **Zigbee (to HA) and BLE (service port)
+concurrently**; BLE is for the developer/operator only and never required for normal HA use.
+
+### Pair / join HA (ZHA)
+1. In HA: ZHA → *Add device* (opens permit-join).
+2. If the XIAO is fresh or stuck on an old network, factory-reset its Zigbee state so it steers for
+   a new coordinator: `ble-client zbreset` (leaves the network, clears ZBOSS NVRAM, reboots into
+   `DEVICE_FIRST_START` → BDB network steering). The BLE link drops for ~1–5 s as it reboots.
+3. The device multi-channel scans (11–26), joins, and auto-discovers as one device: a `fan` +
+   three `temperature` sensors (EP2 supply / EP3 extract / EP4 outdoor). Rename the temps in the
+   ZHA UI to taste — renames persist by `unique_id` across restarts and re-pairs. See
+   `tools/ha/README.md` for the full Zigbee signature and the ZHA-vs-Z2M notes.
+
+### Re-join after a DFU
+A BLE DFU (`ble-client flash …` → `confirm`) reboots the device as `DEVICE_REBOOT` with **NVRAM
+intact**, so it resumes the persisted ZHA network automatically — no re-pairing. The Zigbee link
+drops only for the reboot (~10 s). Verified 2026-05-30: after a full over-the-air DFU the device
+came back online in ZHA on its own with all entities live. (Only `zbreset` — not a DFU — wipes the
+Zigbee network and forces a re-pair.)
+
+### Firmware update over BLE (service port)
+See CLAUDE.md → *BLE DFU workflow* for the canonical steps. In brief, from `tools/ble-client`:
+```
+./ble-client flash ../../build/flexitMC/zephyr/zephyr.signed.bin   # upload → test-mark → reset
+./ble-client confirm <hash printed by flash>                       # within the test window
+```
+The upload (~500 KB) takes a few minutes over BLE and runs fine while the device is joined to ZHA.
+MCUboot keeps the previous image in slot 1: if `confirm` is not run, the **next** reset reverts to
+it — a safe rollback for a bad image. To roll back deliberately, flash the previous
+`zephyr.signed.bin` the same way.
+
+### Debug via BLE (no HA needed)
+From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
+- `ble-client scan` — confirm the device is advertising + RSSI.
+- `ble-client state` / `state --human-friendly` — decoded panel snapshot over NUS.
+- `ble-client stream out.bin` — live RS485 byte capture (`xxd out.bin` to inspect).
+- `ble-client mode N` — queue a mode change (0=Stop 1=Min 2=Normal 3=Max) via the Modbus slave.
+- `ble-client list` — MCUboot slot 0/1 image hashes.
+
+### Availability & stale data in HA
+- **Bridge or mesh down** (XIAO unplugged, out of range, or radio wedged): ZHA marks the whole
+  device *unavailable* via its own availability tracking for mains-powered (rx-on) nodes — all
+  entities go unavailable. No firmware action needed.
+- **Data source stale** (XIAO online on Zigbee, but the RS485/CS60 bus has gone silent): each
+  temperature channel publishes the ZCL invalid sentinel `0x8000` after 60 s
+  (`FLEXIT_TEMP_STALE_MS`) of no fresh reading, so HA shows those sensors as *unknown* rather than a
+  frozen value. They recover to live readings automatically when the bus resumes. FanMode has no
+  ZCL invalid value, so a stale mode holds its last-known reading.
 
 ---
 

@@ -65,8 +65,19 @@ LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
 /* How often the ZBOSS-context tick flushes latched values into the clusters. */
 #define FLEXIT_PUBLISH_INTERVAL   (ZB_TIME_ONE_SECOND * 2)
 
+/* Stale-data guard (Phase 4): if the source feeding a temperature channel goes
+ * silent for longer than this, publish the ZCL "invalid" sentinel (0x8000) so
+ * HA shows the sensor as *unknown* rather than a frozen last reading. The
+ * real RS485 FC10 panel broadcast (Phase 5) refreshes well inside this window;
+ * the synthetic feed (every FLEXIT_SYNTH_INTERVAL_S) does too, so live entities
+ * are unaffected — only an actual source dropout trips it. Tune if the bus is
+ * slower than expected. Whole-device drop (bridge/mesh down) is handled
+ * separately by ZHA's own availability tracking — see smarthouse-integration.md.
+ */
+#define FLEXIT_TEMP_STALE_MS      60000
+
 /* Phase 2: synthesise cluster values so the data path is verifiable with no
- * CS60/RS485 bus connected. Phase 4 sets this to 0 and feeds the setters from
+ * CS60/RS485 bus connected. Phase 5 sets this to 0 and feeds the setters from
  * the RS485 decode instead.
  */
 #define FLEXIT_SYNTHETIC_DATA     1
@@ -98,10 +109,17 @@ static zigbee_ep_mode_write_cb_t mode_write_cb;
 static struct {
 	int16_t temp_cc[ZIGBEE_TEMP_COUNT];
 	bool    temp_dirty[ZIGBEE_TEMP_COUNT];
+	int64_t temp_last_ms[ZIGBEE_TEMP_COUNT]; /* uptime of last fresh value; 0 = never */
 	uint8_t mode;       /* Flexit 0..3 */
 	bool    mode_dirty;
 } pending;
 static K_MUTEX_DEFINE(pending_lock);
+
+/* Per-channel staleness, owned by publish_tick (ZBOSS thread only). Starts true
+ * because the attributes initialise to ...VALUE_UNKNOWN; the first fresh value
+ * clears it, and a source dropout sets it again (publishing the sentinel once).
+ */
+static bool temp_stale[ZIGBEE_TEMP_COUNT];
 
 static const uint8_t temp_ep_id[ZIGBEE_TEMP_COUNT] = {
 	[ZIGBEE_TEMP_SUPPLY]  = FLEXIT_TEMP_EP_SUPPLY,
@@ -230,6 +248,13 @@ static void app_clusters_attr_init(void)
 	dev_ctx.identify_attr.identify_time =
 		ZB_ZCL_IDENTIFY_IDENTIFY_TIME_DEFAULT_VALUE;
 
+	/* Attributes init to ...VALUE_UNKNOWN, so each channel starts stale; the
+	 * first fresh setter value flips it and writes the real reading.
+	 */
+	for (int i = 0; i < ZIGBEE_TEMP_COUNT; i++) {
+		temp_stale[i] = true;
+	}
+
 	/* Start at Off; advertise the Low/Medium/High sequence to clients. */
 	dev_ctx.fan_mode     = ZB_ZCL_FAN_CONTROL_FAN_MODE_OFF;
 	dev_ctx.fan_mode_seq = ZB_ZCL_FAN_CONTROL_FAN_MODE_SEQUENCE_LOW_MED_HIGH;
@@ -286,6 +311,7 @@ static void publish_tick(zb_uint8_t param)
 
 	int16_t cc[ZIGBEE_TEMP_COUNT];
 	bool    temp_dirty[ZIGBEE_TEMP_COUNT];
+	int64_t temp_last_ms[ZIGBEE_TEMP_COUNT];
 	uint8_t mode;
 	bool    mode_dirty;
 
@@ -294,19 +320,38 @@ static void publish_tick(zb_uint8_t param)
 		cc[i] = pending.temp_cc[i];
 		temp_dirty[i] = pending.temp_dirty[i];
 		pending.temp_dirty[i] = false;
+		temp_last_ms[i] = pending.temp_last_ms[i];
 	}
 	mode = pending.mode;
 	mode_dirty = pending.mode_dirty;
 	pending.mode_dirty = false;
 	k_mutex_unlock(&pending_lock);
 
+	int64_t now = k_uptime_get();
 	for (int i = 0; i < ZIGBEE_TEMP_COUNT; i++) {
 		if (temp_dirty[i]) {
+			/* Fresh value — publish it and clear any prior stale state. */
 			zb_zcl_set_attr_val(temp_ep_id[i],
 				ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
 				ZB_ZCL_CLUSTER_SERVER_ROLE,
 				ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
 				(zb_uint8_t *)&cc[i], ZB_FALSE);
+			temp_stale[i] = false;
+		} else if (!temp_stale[i] && temp_last_ms[i] != 0 &&
+			   (now - temp_last_ms[i]) > FLEXIT_TEMP_STALE_MS) {
+			/* Source went silent — publish the invalid sentinel once so HA
+			 * shows "unknown" rather than a frozen last reading.
+			 */
+			zb_int16_t unknown =
+				ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_UNKNOWN;
+			zb_zcl_set_attr_val(temp_ep_id[i],
+				ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+				ZB_ZCL_CLUSTER_SERVER_ROLE,
+				ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
+				(zb_uint8_t *)&unknown, ZB_FALSE);
+			temp_stale[i] = true;
+			LOG_WRN("EP%u temperature source stale (>%d ms) — published invalid",
+				temp_ep_id[i], FLEXIT_TEMP_STALE_MS);
 		}
 	}
 
@@ -333,6 +378,7 @@ void zigbee_ep_set_temperature(enum zigbee_temp_channel ch, int16_t centi_celsiu
 	k_mutex_lock(&pending_lock, K_FOREVER);
 	pending.temp_cc[ch] = centi_celsius;
 	pending.temp_dirty[ch] = true;
+	pending.temp_last_ms[ch] = k_uptime_get();
 	k_mutex_unlock(&pending_lock);
 }
 
