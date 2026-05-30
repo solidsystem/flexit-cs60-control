@@ -1,4 +1,4 @@
-"""ZHA quirk for the flexitMC3 Flexit CS60 bridge.
+"""ZHA quirk for the flexitMC Flexit CS60 bridge.
 
 Cosmetic only: name the three Temperature Measurement endpoints
 supply / extract / outdoor. Without it the device still works — ZHA exposes one
@@ -25,7 +25,7 @@ _TEMP_ENDPOINTS = {
     4: ("outdoor_air_temperature", "Outdoor air temperature"),
 }
 
-builder = QuirkBuilder("SolidSystem", "flexitMC3")
+builder = QuirkBuilder("SolidSystem", "flexitMC")
 
 for ep_id, (translation_key, fallback_name) in _TEMP_ENDPOINTS.items():
     builder = builder.sensor(

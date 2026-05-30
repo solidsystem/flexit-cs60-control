@@ -10,7 +10,7 @@ endif()
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
-project(flexitMC3)
+project(flexitMC)
 
 target_sources(app PRIVATE
     src/main.c

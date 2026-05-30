@@ -150,7 +150,7 @@
                 "--dev-id",
                 "1050279550",
                 "--domain",
-                "flexitMC3",
+                "flexitMC",
                 "--build-dir",
                 "${workspaceFolder}/build"
             ],

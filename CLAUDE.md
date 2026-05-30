@@ -1,4 +1,4 @@
-# flexitMC3
+# flexitMC
 
 ## Project goal
 

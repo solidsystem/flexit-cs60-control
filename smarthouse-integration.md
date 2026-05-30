@@ -168,7 +168,7 @@ synthetic feeds for real data). Verified over the air against the `tools/zb-shel
 
 ### Phase 3 — Home Assistant pairing (needs a ZHA/Z2M coordinator; no BLE / no CS60 needed)
 Prep done off-HA (2026-05-30); the remaining items need a live ZHA/Z2M coordinator in HA.
-- [x] Device identity: added ManufacturerName `SolidSystem` + ModelIdentifier `flexitMC3` to the
+- [x] Device identity: added ManufacturerName `SolidSystem` + ModelIdentifier `flexitMC` to the
       Basic cluster (read back over the air) so HA names the device and Z2M can match a converter.
 - [x] Authored `tools/ha/` artifacts: a ZHA v2 quirk (`zha_quirk_flexitmc.py`, friendly
       supply/extract/outdoor names), a Z2M external converter (`zigbee2mqtt_flexitmc.js`), and a

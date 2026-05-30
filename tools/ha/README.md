@@ -1,4 +1,4 @@
-# Home Assistant integration — flexitMC3 (Phase 3)
+# Home Assistant integration — flexitMC (Phase 3)
 
 The XIAO presents as a **single Zigbee node** (one HA *device*) with several
 entities. The temperatures sit on separate endpoints only because the ZCL
@@ -8,7 +8,7 @@ device in HA.
 ## Zigbee signature
 
 - **Manufacturer (Basic 0x0004):** `SolidSystem`
-- **Model (Basic 0x0005):** `flexitMC3`
+- **Model (Basic 0x0005):** `flexitMC`
 
 | Endpoint | Profile | Device type | Input (server) clusters | Maps to | HA entity |
 |----------|---------|-------------|-------------------------|---------|-----------|
@@ -32,10 +32,10 @@ The quirk/converter here only add the friendly **supply/extract/outdoor** names.
 
 ## Expected entities (one device)
 
-- `fan.flexitmc3_*` — Off / Low / Medium / High (→ Stop / Min / Normal / Max)
-- `sensor.flexitmc3_supply_air_temperature`
-- `sensor.flexitmc3_extract_air_temperature`
-- `sensor.flexitmc3_outdoor_air_temperature`
+- `fan.flexitmc_*` — Off / Low / Medium / High (→ Stop / Min / Normal / Max)
+- `sensor.flexitmc_supply_air_temperature`
+- `sensor.flexitmc_extract_air_temperature`
+- `sensor.flexitmc_outdoor_air_temperature`
 
 ## Pairing & validation runbook
 

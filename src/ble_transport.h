@@ -1,5 +1,5 @@
-#ifndef FLEXITMC3_BLE_TRANSPORT_H_
-#define FLEXITMC3_BLE_TRANSPORT_H_
+#ifndef FLEXITMC_BLE_TRANSPORT_H_
+#define FLEXITMC_BLE_TRANSPORT_H_
 
 #include <stddef.h>
 #include <stdint.h>
@@ -22,4 +22,4 @@ void ble_transport_ensure_advertising(void);
  */
 void ble_transport_forward_rs485(const uint8_t *data, size_t len);
 
-#endif /* FLEXITMC3_BLE_TRANSPORT_H_ */
+#endif /* FLEXITMC_BLE_TRANSPORT_H_ */

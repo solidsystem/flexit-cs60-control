@@ -1,4 +1,4 @@
-// Zigbee2MQTT external converter for the flexitMC3 Flexit CS60 bridge.
+// Zigbee2MQTT external converter for the flexitMC Flexit CS60 bridge.
 //
 // UNTESTED against a live Zigbee2MQTT — this is a starting point derived from the
 // device's Zigbee signature (see README.md). Adjust for your Z2M version; the
@@ -18,8 +18,8 @@ const exposes = require('zigbee-herdsman-converters/lib/exposes');
 const e = exposes.presets;
 
 const definition = {
-    zigbeeModel: ['flexitMC3'],
-    model: 'flexitMC3',
+    zigbeeModel: ['flexitMC'],
+    model: 'flexitMC',
     vendor: 'SolidSystem',
     description: 'Flexit CS60 ventilation bridge (XIAO nRF52840)',
     // Named endpoints so the three temperatures are distinguishable.

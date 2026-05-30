@@ -1,5 +1,5 @@
-#ifndef FLEXITMC3_PANEL_MIRROR_H_
-#define FLEXITMC3_PANEL_MIRROR_H_
+#ifndef FLEXITMC_PANEL_MIRROR_H_
+#define FLEXITMC_PANEL_MIRROR_H_
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -59,4 +59,4 @@ void panel_mirror_feed(const uint8_t *data, size_t len);
 /* Atomic copy of the current mirror into *out. Thread-safe. */
 void panel_mirror_snapshot(struct panel_mirror_state *out);
 
-#endif /* FLEXITMC3_PANEL_MIRROR_H_ */
+#endif /* FLEXITMC_PANEL_MIRROR_H_ */

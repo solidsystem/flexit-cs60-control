@@ -1,5 +1,5 @@
-#ifndef FLEXITMC3_RS485_UART_H_
-#define FLEXITMC3_RS485_UART_H_
+#ifndef FLEXITMC_RS485_UART_H_
+#define FLEXITMC_RS485_UART_H_
 
 #include <stddef.h>
 #include <stdint.h>
@@ -23,4 +23,4 @@ int rs485_uart_init(void);
  */
 int rs485_uart_send(const uint8_t *frame, size_t len);
 
-#endif /* FLEXITMC3_RS485_UART_H_ */
+#endif /* FLEXITMC_RS485_UART_H_ */

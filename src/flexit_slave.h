@@ -1,5 +1,5 @@
-#ifndef FLEXITMC3_FLEXIT_SLAVE_H_
-#define FLEXITMC3_FLEXIT_SLAVE_H_
+#ifndef FLEXITMC_FLEXIT_SLAVE_H_
+#define FLEXITMC_FLEXIT_SLAVE_H_
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -75,4 +75,4 @@ int flexit_slave_queue_mode(uint16_t mode);
 /* Atomic copy of the current slave state into *out. */
 void flexit_slave_snapshot(struct flexit_slave_snapshot *out);
 
-#endif /* FLEXITMC3_FLEXIT_SLAVE_H_ */
+#endif /* FLEXITMC_FLEXIT_SLAVE_H_ */
