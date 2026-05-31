@@ -280,8 +280,22 @@ FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
 /*                                                                            */
 /* min/max bound the displayed range; resolution drives HA's display precision*/
 /* (1.0 -> 0 decimals for %, 0.1 -> 1 decimal for °C). units is the BACnet    */
-/* EngineeringUnits value; app_type is the BACnet application type (its group  */
-/* also picks the HA unit in current ZHA, so it must agree with units).       */
+/* EngineeringUnits value; app_type is the BACnet application type.            */
+/*                                                                            */
+/* ZHA's AnalogInputSensor picks unit + device_class from ApplicationType when */
+/* that attribute is present (the temperature app-type group forces both °C   */
+/* AND device_class=temperature). When ApplicationType is *absent* it instead  */
+/* derives only the unit from EngineeringUnits and leaves device_class null.   */
+/* The percentage endpoints keep ApplicationType (percentage maps to a null    */
+/* device_class anyway); the intake-temp endpoint uses FLEXIT_AI_EP_NO_APPTYPE */
+/* below to get °C with a null device_class (matching the % sensors' shape).   */
+/*                                                                            */
+/* Why null device_class is wanted here: with device_class=temperature HA     */
+/* treats the entity as a generic temperature sensor and names it just         */
+/* "Temperature", discarding the endpoint's own name. With device_class null   */
+/* HA falls back to the cluster Description, so the entity reads as            */
+/* "Intake air temperature" — the label we actually want — while still         */
+/* showing °C.                                                                 */
 /* ------------------------------------------------------------------------- */
 #define FLEXIT_AI_EP(name, ep_id, label, minval, maxval, res, units, app_type)   \
 	static zb_char_t   name##_desc[]   = label;                                  \
@@ -313,10 +327,59 @@ FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
 		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
 		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
 
-/* Intake air temperature (°C); the TEMPERATURE app-type group makes ZHA show °C. */
-FLEXIT_AI_EP(intake,    FLEXIT_AI_EP_INTAKE,    "\x16" "Intake air temperature", /* 22 */
-	FLEXIT_AI_TEMP_MIN_C, FLEXIT_AI_TEMP_MAX_C, 0.1f,
-	FLEXIT_AI_UNITS_DEGC, ZB_ZCL_AI_TEMPERATURE_OUTDOOR_AIR);
+/* As FLEXIT_AI_EP, but the ApplicationType (0x0100) attribute is deliberately
+ * omitted from the attribute list. With no ApplicationType to report, ZHA's
+ * AnalogInputSensor falls back to deriving the unit from EngineeringUnits and
+ * leaves device_class null — used for the intake temperature so it reads °C
+ * with a null device_class instead of device_class=temperature. Null
+ * device_class is what we want here: it stops HA from presenting the entity as
+ * a generic temperature sensor named just "Temperature", so HA uses the cluster
+ * Description and the entity reads as "Intake air temperature" (still in °C).
+ * The attribute list is otherwise identical to the canned
+ * ZB_ZCL_DECLARE_ANALOG_INPUT_ATTRIB_LIST (DESCRIPTION..ENGINEERING_UNITS), just
+ * without the trailing APPLICATION_TYPE.
+ */
+#define FLEXIT_AI_EP_NO_APPTYPE(name, ep_id, label, minval, maxval, res, units)   \
+	static zb_char_t   name##_desc[]   = label;                                  \
+	static zb_single_t name##_present  = 0.0f;                                   \
+	static zb_single_t name##_min       = (minval);                              \
+	static zb_single_t name##_max       = (maxval);                              \
+	static zb_single_t name##_resolution = (res);                                \
+	static zb_bool_t   name##_oos      = ZB_FALSE;                               \
+	static zb_uint8_t  name##_reliab   = 0;                                      \
+	static zb_uint8_t  name##_status   = ZB_ZCL_ANALOG_INPUT_STATUS_FLAG_NORMAL; \
+	static zb_uint16_t name##_units    = (units);                               \
+	ZB_ZCL_START_DECLARE_ATTRIB_LIST_CLUSTER_REVISION(name##_attrs, ZB_ZCL_ANALOG_INPUT) \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_DESCRIPTION_ID, name##_desc)       \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_MAX_PRESENT_VALUE_ID, &name##_max) \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_MIN_PRESENT_VALUE_ID, &name##_min) \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_OUT_OF_SERVICE_ID, &name##_oos)    \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID, &name##_present) \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_RELIABILITY_ID, &name##_reliab)    \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_RESOLUTION_ID, &name##_resolution) \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_STATUS_FLAGS_ID, &name##_status)   \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_ENGINEERING_UNITS_ID, &name##_units) \
+	ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST;                                           \
+	static zb_zcl_cluster_desc_t name##_clusters[] = {                          \
+		ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,                \
+			ZB_ZCL_ARRAY_SIZE(name##_attrs, zb_zcl_attr_t), name##_attrs,  \
+			ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID),        \
+	};                                                                          \
+	static zb_af_simple_desc_1_0_t simple_desc_##name = {                        \
+		ep_id, ZB_AF_HA_PROFILE_ID, ZB_HA_SIMPLE_SENSOR_DEVICE_ID,         \
+		FLEXIT_DEVICE_VERSION, 0, 1, 0, { ZB_ZCL_CLUSTER_ID_ANALOG_INPUT } }; \
+	ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_##name,                         \
+		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT);                            \
+	ZB_AF_DECLARE_ENDPOINT_DESC(name##_ep, ep_id, ZB_AF_HA_PROFILE_ID, 0, NULL,  \
+		ZB_ZCL_ARRAY_SIZE(name##_clusters, zb_zcl_cluster_desc_t), name##_clusters, \
+		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
+		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
+
+/* Intake air temperature (°C). No ApplicationType (see FLEXIT_AI_EP_NO_APPTYPE)
+ * so ZHA shows °C from EngineeringUnits with a null device_class.
+ */
+FLEXIT_AI_EP_NO_APPTYPE(intake, FLEXIT_AI_EP_INTAKE, "\x16" "Intake air temperature", /* 22 */
+	FLEXIT_AI_TEMP_MIN_C, FLEXIT_AI_TEMP_MAX_C, 0.1f, FLEXIT_AI_UNITS_DEGC);
 FLEXIT_AI_EP(heat_exch, FLEXIT_AI_EP_HEAT_EXCH, "\x0e" "Heat exchanger",   /* 14 */
 	0.0f, 100.0f, 1.0f, FLEXIT_AI_UNITS_PERCENT, ZB_ZCL_AI_PERCENTAGE_OTHER);
 FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x0f" "Heating element",  /* 15 */
