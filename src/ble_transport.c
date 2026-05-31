@@ -303,6 +303,27 @@ static size_t format_state_line(char *buf, size_t cap)
         }
     }
 
+    /* Setpoint command diagnostics (coil 12 / reg 0x000C). SP_COIL12 should
+     * pulse 1 then drop to 0 as the CS60 reads the value; SP_READS counts the
+     * FC03 reads served. SET2 (0x00C2) is the committed value to watch.
+     */
+    if (pos < cap - 1) {
+        if (sl.pending_setpoint == 0xFFFFu) {
+            w = snprintf(buf + pos, cap - pos,
+                         " SP_QUEUED=none SP_COIL12=%u SP_READS=%u",
+                         sl.coil_setpoint_pending ? 1u : 0u, sl.setpoint_reads);
+        } else {
+            w = snprintf(buf + pos, cap - pos,
+                         " SP_QUEUED=%u.%u SP_REG=%u SP_COIL12=%u SP_READS=%u",
+                         sl.pending_setpoint / 10u, sl.pending_setpoint % 10u,
+                         sl.reg_setpoint_value,
+                         sl.coil_setpoint_pending ? 1u : 0u, sl.setpoint_reads);
+        }
+        if (w > 0 && (size_t)w < cap - pos) {
+            pos += (size_t)w;
+        }
+    }
+
     uint64_t now = (uint64_t)k_uptime_get();
     for (int i = 0; i < PANEL_MIRROR_COUNTER_SLOTS && pos < cap - 1; i++) {
         if (!s.counters[i].used) {
@@ -339,6 +360,9 @@ static size_t format_state_line(char *buf, size_t cap)
  *   "state"   — single-line snapshot of the decoded panel mirror
  *   "mode N"  — queue a CMD_MODE change (N = 0..3) on the Modbus slave;
  *               echoes "mode: queued=N" or "mode: bad arg" on NUS TX
+ *   "setpoint C" — queue a setpoint change (C = °C, optional one decimal, e.g.
+ *               "setpoint 20.5"); clamped 10.0-30.0 °C. Echoes
+ *               "setpoint: queued=C C" or "setpoint: bad arg" on NUS TX
  *   "zbreset" — Zigbee factory reset: leave the network, clear NVRAM and
  *               reboot so the device steers for a new coordinator on next
  *               boot. Echoes an ack on NUS TX, then the BLE link drops as the
@@ -402,6 +426,51 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
                 n_reply = snprintf(reply, sizeof(reply),
                                    "mode: bad arg\n");
             }
+        }
+        if (n_reply > 0) {
+            (void)bt_nus_send(conn, (const uint8_t *)reply,
+                              (uint16_t)n_reply);
+        }
+
+    } else if (len >= 8 && memcmp(data, "setpoint", 8) == 0) {
+        /* Parse "setpoint <C>" where C is °C with an optional single decimal
+         * (e.g. "20" or "20.5"); convert to °C ×10 and clamp to 10.0-30.0 C.
+         * Direct test path for flexit_slave_queue_setpoint() (the same sink the
+         * Zigbee Analog Value setpoint write drives).
+         */
+        char    buf[16];
+        char    reply[48];
+        size_t  copy = (len < sizeof(buf) - 1) ? len : sizeof(buf) - 1;
+        memcpy(buf, data, copy);
+        buf[copy] = '\0';
+
+        char *p = buf + 8;
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+
+        int n_reply;
+        if (*p < '0' || *p > '9') {
+            n_reply = snprintf(reply, sizeof(reply), "setpoint: bad arg\n");
+        } else {
+            int whole = 0;
+            while (*p >= '0' && *p <= '9') {
+                whole = whole * 10 + (*p - '0');
+                p++;
+            }
+            int tenths = 0;
+            if (*p == '.' && p[1] >= '0' && p[1] <= '9') {
+                tenths = p[1] - '0';
+            }
+            int dc = whole * 10 + tenths;
+            if (dc < 100) {
+                dc = 100;
+            } else if (dc > 300) {
+                dc = 300;
+            }
+            (void)flexit_slave_queue_setpoint((uint16_t)dc);
+            n_reply = snprintf(reply, sizeof(reply),
+                               "setpoint: queued=%d.%d C\n", dc / 10, dc % 10);
         }
         if (n_reply > 0) {
             (void)bt_nus_send(conn, (const uint8_t *)reply,

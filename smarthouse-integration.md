@@ -11,7 +11,7 @@ be monitored and controlled from HA dashboards and automations. Initial scope is
 deliberately small (see [Zigbee scope](#zigbee-scope--data-model)):
 
 - **Read-only:** temperature readings, current mode, and heat-exchanger / heating modulation (%).
-- **Writable:** mode only (Stop / Min / Normal / Max).
+- **Writable:** mode (Stop / Min / Normal / Max) and temperature setpoint (°C).
 
 ```
   CS60 ──RS485/Modbus── CI60 panel
@@ -48,6 +48,7 @@ value, so every temperature and percentage needs its own endpoint. Layout:
 | EP4 | Temperature Measurement (0x0402) | server | outdoor air temp | sensor |
 | EP5 | **Analog Input (0x000C)** — `PresentValue` (r, single/float, %) | server | heat-exchanger modulation | sensor (ZHA needs quirk) |
 | EP6 | Analog Input (0x000C) — `PresentValue` (r, single/float, %) | server | heating output | sensor (ZHA needs quirk) |
+| EP7 | **Analog Value (0x000E)** — `PresentValue` (rw, single/float, °C) | server | temperature setpoint (read + **write**) | number (ZHA needs quirk) |
 
 EP3 (originally extract-air temperature) was removed; endpoint IDs are not renumbered.
 
@@ -83,12 +84,38 @@ sensor appears until you install the quirk in `tools/zha-quirk/flexitmc.py` — 
 `QuirkBuilder` matching `SolidSystem`/`flexitMC` that exposes both `PresentValue`s as `%`
 sensors. (Z2M would instead need an external converter.)
 
+### Analog Value writable setpoint (EP7)
+
+The temperature setpoint (`TEMP_SETPOINT_2`, CS60 reg `0x00C2`, °C) is exposed on **EP7** as an
+**Analog Value (0x000E)** `PresentValue` (float, `EngineeringUnits = 62` = °C). It is
+**read-write and reportable**: the bridge pushes the live committed setpoint into it, and a write
+from HA injects a setpoint change onto the RS485 bus.
+
+- ZBOSS lacks an "Analog Output" (0x000D) server, so Analog **Value** (0x000E) is used for the
+  writable channel; it carries the same `PresentValue` semantics. Like Analog Input it is not in
+  ZBOSS's default cluster set, so the firmware defines `ZB_ZCL_SUPPORT_CLUSTER_ANALOG_VALUE`
+  image-wide in `CMakeLists.txt`.
+- **Write path:** a `PresentValue` write arrives in the device callback as raw `data32` (IEEE-754
+  bits); the firmware reads it as a float, clamps to **10–30 °C**, converts to °C ×10, and queues a
+  CS60 setpoint command (coil 12 / reg `0x000C` — see `flexit-cs60-communication.md` §5.4). A short
+  **5 s write-hold** (`FLEXIT_SETPOINT_WRITE_HOLD_MS`) suppresses the periodic readback so the value
+  doesn't snap back to the old reading before the CS60 has adopted the new one.
+- **The write only sticks because the XIAO is at bus address 1** — below the CI60 panel's
+  potentiometer at addr 2. The CS60 lets the *lowest* bus address own the setpoint; from a higher
+  address the write is read but then restamped with the pot's value. See
+  `flexit-cs60-communication.md` §5.4. Consequence: after a remote write the CI60's physical dial is
+  out of sync with the actual setpoint (inherent to overriding a potentiometer); turning the dial
+  still works since the XIAO only asserts coil 12 when a write is queued.
+- **ZHA caveat:** as with EP5/EP6, ZHA does not auto-expose a generic Analog Value cluster. The
+  quirk in `tools/zha-quirk/flexitmc.py` maps EP7 `PresentValue` to a `.number()` entity
+  (10–30 °C, 0.5 °C step).
+
 ### Attribute reporting
 
 Configure reporting on `MeasuredValue` (temps), `FanMode` (mode), and `PresentValue` (the
-EP5/EP6 percentages) — min/max interval + reportable change — so HA receives push updates
-instead of polling. For the quirk-defined Analog Input sensors, ZHA sets this up from the
-`reporting_config` in `tools/zha-quirk/flexitmc.py`.
+EP5/EP6 percentages and the EP7 setpoint) — min/max interval + reportable change — so HA receives
+push updates instead of polling. For the quirk-defined Analog Input/Value entities, ZHA sets this
+up from the `reporting_config` in `tools/zha-quirk/flexitmc.py`.
 
 ---
 
@@ -114,6 +141,8 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
 - `ble-client state` / `state --human-friendly` — decoded panel snapshot over NUS.
 - `ble-client stream out.bin` — live RS485 byte capture (`xxd out.bin` to inspect).
 - `ble-client mode N` — queue a mode change (0=Stop 1=Min 2=Normal 3=Max) via the Modbus slave.
+- `ble-client setpoint C` — queue a temperature-setpoint change (°C, e.g. `21` or `20.5`) via the
+  Modbus slave (coil 12 / reg `0x000C`). Kept for protocol RE/debugging alongside the HA path.
 - `ble-client list` — MCUboot slot 0/1 image hashes.
 
 ### Availability & stale data in HA
@@ -123,19 +152,20 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
 - **Data source stale** (XIAO online on Zigbee, but the RS485/CS60 bus has gone silent): each
   temperature channel publishes the ZCL invalid sentinel `0x8000` after 60 s
   (`FLEXIT_TEMP_STALE_MS`) of no fresh reading, so HA shows those sensors as *unknown* rather than a
-  frozen value. They recover to live readings automatically when the bus resumes. FanMode and the
-  EP5/EP6 Analog Input percentages have no ZCL invalid value, so a stale mode/percentage holds its
-  last-known reading.
+  frozen value. They recover to live readings automatically when the bus resumes. FanMode, the
+  EP5/EP6 Analog Input percentages and the EP7 Analog Value setpoint have no ZCL invalid value, so a
+  stale mode/percentage/setpoint holds its last-known reading.
 
 ---
 
 ## References
 
 - `flexit-cs60-communication.md` — reverse-engineered RS485/Modbus protocol.
-- `tools/ble-client` — existing BLE tooling (stream/state/mode/flash).
+- `tools/ble-client` — existing BLE tooling (stream/state/mode/setpoint/flash).
 - `tools/zha-quirk/flexitmc.py` — ZHA v2 quirk exposing the EP5/EP6 Analog Input percentages as
-  `%` sensors (ZHA ignores generic Analog Input clusters otherwise). Drop into HA's
-  `custom_quirks_path`; install notes are in the file's docstring.
+  `%` sensors and the EP7 Analog Value setpoint as a °C `number` (ZHA ignores generic Analog
+  Input/Value clusters otherwise). Drop into HA's `custom_quirks_path`; install notes are in the
+  file's docstring.
 - `tools/zb-coordinator` — test Zigbee coordinator (ncs-zigbee `network_coordinator` + a static
   PM file) for the nrf52840dk; used to verify the end-device join. Build with
   `-DZEPHYR_EXTRA_MODULES=$HOME/ncs/v3.3.0/ncs-zigbee` (after `--`), flash with `west flash`.

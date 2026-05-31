@@ -11,6 +11,7 @@
  *   EP4  Temperature Measurement         — outdoor air
  *   EP5  Analog Input (Basic)            — heat-exchanger modulation (%)
  *   EP6  Analog Input (Basic)            — heating output (%)
+ *   EP7  Analog Value (Basic)            — temperature setpoint (read/write)
  *
  * Cluster values are fed through the setters below from any thread; they are
  * latched and pushed into the ZCL attributes from the Zigbee stack thread
@@ -39,6 +40,13 @@ enum zigbee_analog_channel {
  */
 typedef void (*zigbee_ep_mode_write_cb_t)(uint8_t flexit_mode);
 
+/* Invoked (from the ZBOSS stack thread) when a Zigbee client writes the
+ * setpoint Analog Value PresentValue. `value_dc` is the requested temperature
+ * in tenths of a degree Celsius (°C ×10), matching the CS60 register encoding.
+ * flexit_bridge points this at flexit_slave_queue_setpoint().
+ */
+typedef void (*zigbee_ep_setpoint_write_cb_t)(int16_t value_dc);
+
 /* Register the Zigbee endpoints and start the ZBOSS stack (end device). Call
  * once at boot, after the BLE stack is up. Returns 0 on success.
  */
@@ -61,6 +69,15 @@ void zigbee_ep_set_mode(uint8_t flexit_mode);
 
 /* Register the handler called when a Zigbee client writes FanMode. */
 void zigbee_ep_set_mode_write_handler(zigbee_ep_mode_write_cb_t cb);
+
+/* Publish the current temperature setpoint read back from the CS60 as the
+ * setpoint Analog Value PresentValue. `value_dc` is in tenths of a degree
+ * Celsius (°C ×10). Thread-safe.
+ */
+void zigbee_ep_set_setpoint(int16_t value_dc);
+
+/* Register the handler called when a Zigbee client writes the setpoint. */
+void zigbee_ep_set_setpoint_write_handler(zigbee_ep_setpoint_write_cb_t cb);
 
 /* Perform a Zigbee "factory reset" (BDB reset via local action): leave the
  * current network, clear ZBOSS persistent data, then reboot. The reboot is

@@ -19,6 +19,10 @@ project(flexitMC)
 # percentage Analog Input endpoints (EP5/EP6) in src/zigbee_ep.c.
 zephyr_compile_definitions(ZB_ZCL_SUPPORT_CLUSTER_ANALOG_INPUT)
 
+# Likewise Analog Value (0x000E) is omitted from the built-in set; it backs the
+# writable temperature-setpoint endpoint (EP7) in src/zigbee_ep.c.
+zephyr_compile_definitions(ZB_ZCL_SUPPORT_CLUSTER_ANALOG_VALUE)
+
 target_sources(app PRIVATE
     src/main.c
     src/ble_transport.c

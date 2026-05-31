@@ -37,6 +37,17 @@ static void mode_write_handler(uint8_t flexit_mode)
 	}
 }
 
+/* Setpoint write (ZHA -> CS60): value_dc is °C ×10, matching both the CS60
+ * register encoding and flexit_slave_queue_setpoint().
+ */
+static void setpoint_write_handler(int16_t value_dc)
+{
+	int err = flexit_slave_queue_setpoint((uint16_t)value_dc);
+	if (err) {
+		LOG_WRN("flexit_slave_queue_setpoint(%d) failed: %d", value_dc, err);
+	}
+}
+
 static void bridge_work_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(bridge_work, bridge_work_fn);
 
@@ -66,6 +77,9 @@ static void bridge_work_fn(struct k_work *work)
 		zigbee_ep_set_percent(ZIGBEE_ANALOG_HEATING,
 			st.pct_heating);
 
+		/* Setpoint readback: the committed value (0x00C2), already °C ×10. */
+		zigbee_ep_set_setpoint(st.temp_setpoint_2_x10);
+
 		if (st.mode <= 3) {
 			zigbee_ep_set_mode((uint8_t)st.mode);
 		}
@@ -77,6 +91,7 @@ static void bridge_work_fn(struct k_work *work)
 int flexit_bridge_init(void)
 {
 	zigbee_ep_set_mode_write_handler(mode_write_handler);
+	zigbee_ep_set_setpoint_write_handler(setpoint_write_handler);
 	k_work_schedule(&bridge_work, K_SECONDS(BRIDGE_POLL_INTERVAL_S));
 	LOG_INF("Flexit<->Zigbee bridge started (poll %ds)", BRIDGE_POLL_INTERVAL_S);
 	return 0;

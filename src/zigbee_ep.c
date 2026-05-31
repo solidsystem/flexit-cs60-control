@@ -6,6 +6,7 @@
  *   EP4  Temperature Measurement  (outdoor air)
  *   EP5  Analog Input (Basic)     (heat-exchanger modulation %)
  *   EP6  Analog Input (Basic)     (heating output %)
+ *   EP7  Analog Value (Basic)     (temperature setpoint, read/write)
 *
  * The endpoints are hand-declared (rather than via a canned HA device-type
  * macro) so EP1 can carry Fan Control and so the temperature endpoints
@@ -18,6 +19,8 @@
  * which runs on the ZBOSS stack thread (ZCL attribute writes must happen in
  * ZBOSS context). See smarthouse-integration.md.
  */
+
+#include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -32,6 +35,7 @@
 #include <zcl/zb_zcl_temp_measurement.h>
 #include <zcl/zb_zcl_fan_control.h>
 #include <zcl/zb_zcl_analog_input.h>
+#include <zcl/zb_zcl_analog_value.h>
 #include <ha/zb_ha_device_config.h>
 #include <zigbee/zigbee_error_handler.h>
 #include <zigbee/zigbee_app_utils.h>
@@ -47,9 +51,20 @@ LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
 #define FLEXIT_TEMP_EP_OUTDOOR    4   /* EP3 (extract air) removed */
 #define FLEXIT_AI_EP_HEAT_EXCH    5   /* Analog Input — HX modulation %  */
 #define FLEXIT_AI_EP_HEATING      6   /* Analog Input — heating output % */
+#define FLEXIT_AV_EP_SETPOINT     7   /* Analog Value — temp setpoint (rw) */
 
-/* ZCL EngineeringUnits enum (BACnet-derived): 98 == "percent". */
+/* ZCL EngineeringUnits enum (BACnet-derived): 98 == "percent", 62 == "degrees C". */
 #define FLEXIT_AI_UNITS_PERCENT   98
+#define FLEXIT_AV_UNITS_DEGC      62
+
+/* Setpoint clamp (°C ×10) applied to writes from a Zigbee client. */
+#define FLEXIT_SETPOINT_MIN_DC    100   /* 10.0 C */
+#define FLEXIT_SETPOINT_MAX_DC    300   /* 30.0 C */
+
+/* After a client write, ignore CS60 readback for this long so the just-written
+ * value isn't transiently overwritten by the (still old) committed reading
+ * before the CS60 adopts and re-broadcasts it. */
+#define FLEXIT_SETPOINT_WRITE_HOLD_MS 5000
 
 #define FLEXIT_DEVICE_VERSION     0
 #define FLEXIT_INIT_BASIC_POWER_SOURCE  ZB_ZCL_BASIC_POWER_SOURCE_DC_SOURCE
@@ -101,7 +116,8 @@ struct zb_device_ctx {
 
 static struct zb_device_ctx dev_ctx;
 
-static zigbee_ep_mode_write_cb_t mode_write_cb;
+static zigbee_ep_mode_write_cb_t     mode_write_cb;
+static zigbee_ep_setpoint_write_cb_t setpoint_write_cb;
 
 /* Latched cluster values, produced by the setters and consumed by publish_tick. */
 static struct {
@@ -110,6 +126,9 @@ static struct {
 	int64_t temp_last_ms[ZIGBEE_TEMP_COUNT]; /* uptime of last fresh value; 0 = never */
 	float   analog_val[ZIGBEE_ANALOG_COUNT]; /* percentage, 0..100 */
 	bool    analog_dirty[ZIGBEE_ANALOG_COUNT];
+	float   setpoint_val;     /* setpoint readback, °C */
+	bool    setpoint_dirty;
+	int64_t setpoint_hold_until; /* skip readback latch until this uptime (ms) */
 	uint8_t mode;       /* Flexit 0..3 */
 	bool    mode_dirty;
 } pending;
@@ -235,8 +254,8 @@ ZB_DECLARE_SIMPLE_DESC(1, 0);
 		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
 		ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
 
-FLEXIT_TEMP_EP(supply,  FLEXIT_TEMP_EP_SUPPLY,  "\x06" "supply");
-FLEXIT_TEMP_EP(outdoor, FLEXIT_TEMP_EP_OUTDOOR, "\x07" "outdoor");
+FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
+FLEXIT_TEMP_EP(outdoor,   FLEXIT_TEMP_EP_OUTDOOR,    "\x07" "outdoor");
 
 /* ------------------------------------------------------------------------- */
 /* EP5/EP6 — Analog Input (Basic), one cluster each, percentage 0..100        */
@@ -282,8 +301,55 @@ FLEXIT_TEMP_EP(outdoor, FLEXIT_TEMP_EP_OUTDOOR, "\x07" "outdoor");
 FLEXIT_AI_EP(heat_exch, FLEXIT_AI_EP_HEAT_EXCH, "\x0e" "heat_exchanger"); /* 14 */
 FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x07" "heating");        /*  7 */
 
-/* No N-EP convenience macro past 4, so declare the 5-endpoint list by hand
- * (same expansion as ZBOSS_DECLARE_DEVICE_CTX_n_EP).
+/* ------------------------------------------------------------------------- */
+/* EP7 — Analog Value (Basic): writable temperature setpoint                  */
+/*                                                                            */
+/* PresentValue is read/write (float °C) so a Zigbee client can both read the */
+/* CS60's current setpoint and push a new one; the write fires zcl_device_cb  */
+/* -> setpoint_write_cb -> flexit_slave_queue_setpoint (coil 12 / reg 0x000C).*/
+/* PresentValue is marked reportable (overriding the canned RW-only descriptor)*/
+/* so panel-driven changes push to HA. EngineeringUnits = 62 (°C). ZHA does    */
+/* not auto-expose Analog Value, so tools/zha-quirk/flexitmc.py maps it to a   */
+/* settable Number entity.                                                     */
+/* ------------------------------------------------------------------------- */
+static zb_char_t   av_setpoint_desc[]    = "\x08" "setpoint";
+static zb_single_t av_setpoint_present   = 0.0f;   /* °C */
+static zb_bool_t   av_setpoint_oos       = ZB_FALSE;
+static zb_uint8_t  av_setpoint_reliab    = 0;
+static zb_single_t av_setpoint_relinq    = 0.0f;
+static zb_uint8_t  av_setpoint_status    = ZB_ZCL_ANALOG_VALUE_STATUS_FLAG_NORMAL;
+static zb_uint16_t av_setpoint_units     = FLEXIT_AV_UNITS_DEGC;
+static zb_uint32_t av_setpoint_app_type  = ZB_ZCL_AV_TEMPERATURE_OTHER;
+
+ZB_ZCL_START_DECLARE_ATTRIB_LIST_CLUSTER_REVISION(av_setpoint_attrs, ZB_ZCL_ANALOG_VALUE)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_VALUE_DESCRIPTION_ID, av_setpoint_desc)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_VALUE_OUT_OF_SERVICE_ID, &av_setpoint_oos)
+	ZB_ZCL_SET_ATTR_DESC_M(ZB_ZCL_ATTR_ANALOG_VALUE_PRESENT_VALUE_ID, &av_setpoint_present,
+		ZB_ZCL_ATTR_TYPE_SINGLE,
+		ZB_ZCL_ATTR_ACCESS_READ_WRITE | ZB_ZCL_ATTR_ACCESS_REPORTING)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_VALUE_RELIABILITY_ID, &av_setpoint_reliab)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_VALUE_RELINQUISH_DEFAULT_ID, &av_setpoint_relinq)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_VALUE_STATUS_FLAGS_ID, &av_setpoint_status)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_VALUE_ENGINEERING_UNITS_ID, &av_setpoint_units)
+	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_VALUE_APPLICATION_TYPE_ID, &av_setpoint_app_type)
+ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST;
+
+static zb_zcl_cluster_desc_t av_setpoint_clusters[] = {
+	ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_ANALOG_VALUE,
+		ZB_ZCL_ARRAY_SIZE(av_setpoint_attrs, zb_zcl_attr_t), av_setpoint_attrs,
+		ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID),
+};
+static zb_af_simple_desc_1_0_t simple_desc_av_setpoint = {
+	FLEXIT_AV_EP_SETPOINT, ZB_AF_HA_PROFILE_ID, ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
+	FLEXIT_DEVICE_VERSION, 0, 1, 0, { ZB_ZCL_CLUSTER_ID_ANALOG_VALUE } };
+ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_av_setpoint, 1 /* PresentValue */);
+ZB_AF_DECLARE_ENDPOINT_DESC(av_setpoint_ep, FLEXIT_AV_EP_SETPOINT, ZB_AF_HA_PROFILE_ID, 0, NULL,
+	ZB_ZCL_ARRAY_SIZE(av_setpoint_clusters, zb_zcl_cluster_desc_t), av_setpoint_clusters,
+	(zb_af_simple_desc_1_1_t *)&simple_desc_av_setpoint, 1, reporting_av_setpoint, 0, NULL);
+
+/* No N-EP convenience macro past 4, so declare the 6-endpoint list by hand
+ * (same expansion as ZBOSS_DECLARE_DEVICE_CTX_n_EP). 6 app endpoints is within
+ * ZB_MAX_EP_NUMBER (8); an end device adds no Green Power endpoint.
  */
 ZB_AF_START_DECLARE_ENDPOINT_LIST(ep_list_flexit_ctx)
 	&ctrl_ep,
@@ -291,6 +357,7 @@ ZB_AF_START_DECLARE_ENDPOINT_LIST(ep_list_flexit_ctx)
 	&outdoor_ep,
 	&heat_exch_ep,
 	&heating_ep,
+	&av_setpoint_ep,
 ZB_AF_FINISH_DECLARE_ENDPOINT_LIST;
 ZBOSS_DECLARE_DEVICE_CTX(flexit_ctx, ep_list_flexit_ctx,
 	ZB_ZCL_ARRAY_SIZE(ep_list_flexit_ctx, zb_af_endpoint_desc_t *));
@@ -340,6 +407,35 @@ static void handle_fan_mode_write(zb_uint8_t fan_mode)
 	}
 }
 
+/* ------------------------------------------------------------------------- */
+/* Setpoint write handling (Zigbee client -> Flexit)                         */
+/* ------------------------------------------------------------------------- */
+static void handle_setpoint_write(float celsius)
+{
+	/* Round °C to tenths and clamp to the unit's range. */
+	int32_t dc = (int32_t)(celsius * 10.0f + (celsius >= 0.0f ? 0.5f : -0.5f));
+	if (dc < FLEXIT_SETPOINT_MIN_DC) {
+		dc = FLEXIT_SETPOINT_MIN_DC;
+	} else if (dc > FLEXIT_SETPOINT_MAX_DC) {
+		dc = FLEXIT_SETPOINT_MAX_DC;
+	}
+
+	/* Hold off readback so the committed value (still old until the CS60
+	 * adopts ours) doesn't transiently overwrite the just-written value.
+	 */
+	k_mutex_lock(&pending_lock, K_FOREVER);
+	pending.setpoint_hold_until = k_uptime_get() + FLEXIT_SETPOINT_WRITE_HOLD_MS;
+	k_mutex_unlock(&pending_lock);
+
+	if (setpoint_write_cb != NULL) {
+		LOG_INF("Setpoint write -> %d.%d C", (int)dc / 10, (int)dc % 10);
+		setpoint_write_cb((int16_t)dc);
+	} else {
+		LOG_INF("Setpoint write -> %d.%d C (stub: no sink registered)",
+			(int)dc / 10, (int)dc % 10);
+	}
+}
+
 /* Global ZCL device callback — fires after the stack applies a write. */
 static void zcl_device_cb(zb_bufid_t bufid)
 {
@@ -356,6 +452,13 @@ static void zcl_device_cb(zb_bufid_t bufid)
 		    attr_id == ZB_ZCL_ATTR_FAN_CONTROL_FAN_MODE_ID) {
 			handle_fan_mode_write(
 				p->cb_param.set_attr_value_param.values.data8);
+		} else if (cluster_id == ZB_ZCL_CLUSTER_ID_ANALOG_VALUE &&
+			   attr_id == ZB_ZCL_ATTR_ANALOG_VALUE_PRESENT_VALUE_ID) {
+			/* SINGLE (float) arrives as the raw 32-bit IEEE-754 word. */
+			zb_uint32_t raw = p->cb_param.set_attr_value_param.values.data32;
+			float celsius;
+			memcpy(&celsius, &raw, sizeof(celsius));
+			handle_setpoint_write(celsius);
 		}
 	}
 }
@@ -372,6 +475,8 @@ static void publish_tick(zb_uint8_t param)
 	int64_t temp_last_ms[ZIGBEE_TEMP_COUNT];
 	float   analog_val[ZIGBEE_ANALOG_COUNT];
 	bool    analog_dirty[ZIGBEE_ANALOG_COUNT];
+	float   setpoint_val;
+	bool    setpoint_dirty;
 	uint8_t mode;
 	bool    mode_dirty;
 
@@ -387,6 +492,9 @@ static void publish_tick(zb_uint8_t param)
 		analog_dirty[i] = pending.analog_dirty[i];
 		pending.analog_dirty[i] = false;
 	}
+	setpoint_val = pending.setpoint_val;
+	setpoint_dirty = pending.setpoint_dirty;
+	pending.setpoint_dirty = false;
 	mode = pending.mode;
 	mode_dirty = pending.mode_dirty;
 	pending.mode_dirty = false;
@@ -428,6 +536,14 @@ static void publish_tick(zb_uint8_t param)
 				ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
 				(zb_uint8_t *)&analog_val[i], ZB_FALSE);
 		}
+	}
+
+	if (setpoint_dirty) {
+		zb_zcl_set_attr_val(FLEXIT_AV_EP_SETPOINT,
+			ZB_ZCL_CLUSTER_ID_ANALOG_VALUE,
+			ZB_ZCL_CLUSTER_SERVER_ROLE,
+			ZB_ZCL_ATTR_ANALOG_VALUE_PRESENT_VALUE_ID,
+			(zb_uint8_t *)&setpoint_val, ZB_FALSE);
 	}
 
 	if (mode_dirty) {
@@ -482,6 +598,24 @@ void zigbee_ep_set_mode(uint8_t flexit_mode)
 void zigbee_ep_set_mode_write_handler(zigbee_ep_mode_write_cb_t cb)
 {
 	mode_write_cb = cb;
+}
+
+void zigbee_ep_set_setpoint(int16_t value_dc)
+{
+	k_mutex_lock(&pending_lock, K_FOREVER);
+	/* Skip readback during the post-write hold so we don't clobber a value
+	 * the client just set with the CS60's not-yet-updated committed reading.
+	 */
+	if (k_uptime_get() >= pending.setpoint_hold_until) {
+		pending.setpoint_val = (float)value_dc / 10.0f;
+		pending.setpoint_dirty = true;
+	}
+	k_mutex_unlock(&pending_lock);
+}
+
+void zigbee_ep_set_setpoint_write_handler(zigbee_ep_setpoint_write_cb_t cb)
+{
+	setpoint_write_cb = cb;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -583,9 +717,10 @@ int zigbee_ep_init(void)
 
 	zigbee_enable();
 
-	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d temps + EP%d/%d analog)",
+	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d temps + EP%d/%d analog + EP%d setpoint)",
 		FLEXIT_TEMP_EP_SUPPLY, FLEXIT_TEMP_EP_OUTDOOR,
-		FLEXIT_AI_EP_HEAT_EXCH, FLEXIT_AI_EP_HEATING);
+		FLEXIT_AI_EP_HEAT_EXCH, FLEXIT_AI_EP_HEATING,
+		FLEXIT_AV_EP_SETPOINT);
 
 	return 0;
 }

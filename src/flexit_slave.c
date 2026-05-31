@@ -47,6 +47,9 @@ static struct {
     uint16_t last_acked_mode;
     uint64_t last_ack_uptime_ms;
 
+    uint16_t pending_setpoint;  /* last queued setpoint (°C ×10); SENTINEL_NONE if none */
+    uint32_t setpoint_reads;    /* FC03 reads of reg 0x000C we served */
+
     uint32_t fc01_serviced;
     uint32_t fc03_serviced;
     uint32_t fc04_serviced;
@@ -225,6 +228,18 @@ static void handle_fc03_request(const uint8_t *frame)
     resp_len = build_fc03_response(resp, sizeof(resp), addr, qty);
     if (resp_len > 0) {
         state.fc03_serviced++;
+
+        /* Setpoint: self-clear coil 12 once the CS60 has read reg 0x000C, so a
+         * single read delivers the value (same shape as CMD_MODE). The CS60
+         * then broadcasts an FC65 ack carrying the adopted value.
+         */
+        uint16_t sp = FLEXIT_SLAVE_CMD_SETPOINT_ADDR;
+        bool covers_sp = (addr <= sp) && (sp < addr + qty);
+        bool coil_set  = state.coils[sp >> 3] & (uint8_t)(1u << (sp & 7));
+        if (covers_sp && coil_set) {
+            state.coils[sp >> 3] &= (uint8_t)~(1u << (sp & 7));
+            state.setpoint_reads++;
+        }
     }
     k_mutex_unlock(&state_mutex);
 
@@ -374,8 +389,9 @@ int flexit_slave_init(void)
 {
     k_mutex_lock(&state_mutex, K_FOREVER);
     memset(&state, 0, sizeof(state));
-    state.pending_mode    = SENTINEL_NONE;
-    state.last_acked_mode = SENTINEL_NONE;
+    state.pending_mode     = SENTINEL_NONE;
+    state.last_acked_mode  = SENTINEL_NONE;
+    state.pending_setpoint = SENTINEL_NONE;
     k_mutex_unlock(&state_mutex);
     accum_len = 0;
     printk("flexit_slave: addr=%u, %u coils / %u regs\n",
@@ -430,6 +446,21 @@ int flexit_slave_queue_mode(uint16_t mode)
     return 0;
 }
 
+int flexit_slave_queue_setpoint(uint16_t value_x10)
+{
+    const uint16_t sp = FLEXIT_SLAVE_CMD_SETPOINT_ADDR;
+
+    k_mutex_lock(&state_mutex, K_FOREVER);
+    state.regs[sp] = value_x10;
+    state.coils[sp >> 3] |= (uint8_t)(1u << (sp & 7));
+    state.pending_setpoint = value_x10;
+    k_mutex_unlock(&state_mutex);
+
+    printk("flexit_slave: queued setpoint=%u.%u C (coil 12 raised, reg 0x000C = %u)\n",
+           value_x10 / 10u, value_x10 % 10u, value_x10);
+    return 0;
+}
+
 void flexit_slave_snapshot(struct flexit_slave_snapshot *out)
 {
     if (out == NULL) {
@@ -447,5 +478,13 @@ void flexit_slave_snapshot(struct flexit_slave_snapshot *out)
     out->crc_failures        = state.crc_failures;
     out->coil0_pending       = (state.coils[0] & 0x01u) != 0;
     out->reg0_value          = state.regs[FLEXIT_SLAVE_CMD_MODE_ADDR];
+
+    {
+        const uint16_t sp = FLEXIT_SLAVE_CMD_SETPOINT_ADDR;
+        out->pending_setpoint       = state.pending_setpoint;
+        out->coil_setpoint_pending  = (state.coils[sp >> 3] & (uint8_t)(1u << (sp & 7))) != 0;
+        out->reg_setpoint_value     = state.regs[sp];
+        out->setpoint_reads         = state.setpoint_reads;
+    }
     k_mutex_unlock(&state_mutex);
 }

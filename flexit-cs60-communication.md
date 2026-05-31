@@ -14,6 +14,7 @@ Four captures are referenced:
 | `trafficdata/rs485-panel-up-down.bin`      | 130 260 B | ~54 s    | Speed setting changed via panel: min → medium → max → medium → min. CI60 only. |
 | `trafficdata/rs485-init-2.bin`             | ~80 kB    | varies   | CS60 cold-boot with sniffer up but no extra slave answering FC04. |
 | `trafficdata/rs485-init-3.bin`             | ~76 kB    | varies   | CS60 cold-boot with a second slave answering FC04 (TX echo into the capture). |
+| `trafficdata/rs484-temp-setpoint-adjust.bin` | varies | varies   | CI60 setpoint potentiometer turned to adjust supply air temperature setpoint — coil 12 / reg `0x000C` cycle (§5.4). |
 
 The idle and panel captures show ~16–17 % bus utilisation at 115200
 baud during steady-state polling (~8 cycles/s). The init captures
@@ -109,7 +110,7 @@ any real Modbus frame shape).
 | FC | Name | Direction | What it carries |
 |----|------|-----------|-----------------|
 | `0x01` | ReadCoils | CS60 → slave | Polls the slave's "pending command" coil bitmap. Two requests per cycle cover coils 0–683. Responses are 332-coil (47 B) and 352-coil (49 B). The bitmap is **all zeros** until a slave raises a command flag (coil 0 = CMD_MODE in the captured cases). |
-| `0x03` | ReadHoldingRegs | CS60 → slave | Single-register reads, only issued *as a follow-up* after a slave has raised a coil. The request is 8 B (`02 03 00 00 00 01 84 39` = read 1 reg at addr 0); the response is 7 B (`02 03 02 NN NN CC CC`). |
+| `0x03` | ReadHoldingRegs | CS60 → slave | Single-register reads, only issued *as a follow-up* after a slave has raised a coil. The request is 8 B (`02 03 00 00 00 01 84 39` = read 1 reg at addr 0 for MODE; addr `0x000C` for the setpoint, §5.4); the response is 7 B (`02 03 02 NN NN CC CC`). |
 | `0x04` | ReadInputRegs | CS60 → slave (probe) | Boot-time enumeration sweep — 8 B request asking for input regs 0..3. See §6. |
 | `0x06` | WriteSingleReg | CS60 → broadcast | Runtime counters (operating-minutes per mode + filter + rotor). 67 frames in 18 s idle, 203 in 54 s panel. |
 | `0x10` | WriteMultipleRegs | CS60 → broadcast | Two distinct shapes: (a) the **status block** at `0x00BE` (85 regs, 179 B, every ~120 ms), and (b) a **bulk-init burst** that appears only at boot — four chained writes covering regs `0x0000..0x015F`, see §6. |
@@ -249,6 +250,60 @@ bitmap: byte 0 = `0x01`, all other bytes zero. That maps to **coil 0
 only** — the `CMD_MODE` flag. No other panel-driven commands fired in
 this capture.
 
+### 5.4 Temperature-setpoint command (coil 12 / reg `0x000C`)
+
+The setpoint is set through the **same coil + FC03 + adopt cycle** as
+MODE, but on a different slot and with one crucial twist about *which*
+slave is allowed to win.
+
+From `trafficdata/rs484-temp-setpoint-adjust.bin` (CI60 panel
+potentiometer turned to 19.5 °C), and from active XIAO write
+experiments:
+
+```
+  slave FC01 resp     bitmap → coil 12 set   (CMD_SETPOINT pending)
+  CS60  FC03 req      read 1 holding reg at addr 0x000C
+  slave FC03 resp     value = 0x00C3 (195 = 19.5 °C ×10)
+  CS60  FC10 cast     status block: TEMP_SETPOINT(0x00BE) /
+                      TEMP_SETPOINT_2(0x00C2) updated to the new value
+```
+
+- **Slot:** coil **12** + holding register **`0x000C`**; value is
+  **°C ×10** (e.g. `195` = 19.5 °C), same encoding as the status-block
+  setpoint registers.
+- Unlike MODE, the setpoint cycle in our captures is **not** always
+  followed by an FC65 ack on reg `0x000C`; the new value simply shows up
+  in the next FC10 status broadcast (`0x00BE` / `0x00C2`). The XIAO
+  slave therefore self-clears coil 12 once its FC03 read of `0x000C` has
+  been served (one read delivers the value), rather than waiting for an
+  FC65.
+
+#### Lowest bus address owns the setpoint
+
+The decisive finding (confirmed by experiment): **the CS60 lets the
+*lowest* bus address own the temperature setpoint.** The CI60 panel,
+with its setpoint potentiometer, sits at **addr 2**.
+
+- With the XIAO at **addr 3** (above the panel), a setpoint write was
+  *read* by the CS60 (FC03 returned our value), but the CS60 then
+  broadcast an FC65 restamping reg `0x000C` with the **pot's** value —
+  our write was rejected.
+- With the XIAO moved to **addr 1** (below the panel), the same write is
+  **adopted**: a single coil-12 raise + FC03 read is enough, and the new
+  value appears in the FC10 status broadcast and sticks. Verified with
+  `setpoint 21.0` → `SET=21.0 SET2=21.0`, one FC03 read, no fighting.
+
+This is why `FLEXIT_SLAVE_ADDR` is **1** (see `src/flexit_slave.h`).
+MODE control (coil 0) works from any registered address; only the
+setpoint is gated by the lowest-address rule.
+
+> **Consequence — pot desync.** After a remote setpoint write, the CI60's
+> physical dial reads the old position while the CS60 holds the new
+> value (inherent to overriding a potentiometer from a lower address).
+> Turning the dial still works: the XIAO only asserts coil 12 when a
+> write is actively queued, so when it is idle the pot is free to drive
+> the setpoint again.
+
 ---
 
 ## 6. Boot enumeration (`rs485-init-3.bin`)
@@ -335,11 +390,20 @@ that don't fit cleanly inside the per-function-code descriptions:
    inputs, all four percentage outputs and the runtime counters in
    full, without ever joining the polled-slave set.
 
-2. **Commands enter the system only via the slave coil + FC65
-   cycle.** A device that wants to *write* (e.g. change MODE) has
-   to be enrolled at boot, raise a coil, and let CS60 run the
-   FC03 → FC65 follow-up. There is no master-side "write" path
-   available to a non-slave.
+2. **Commands enter the system only via the slave coil + FC03
+   cycle.** A device that wants to *write* (e.g. change MODE or the
+   setpoint) has to be enrolled at boot, raise a coil, and let CS60
+   run the FC03 read follow-up (MODE additionally gets an FC65 ack;
+   the setpoint does not — see §5.4). There is no master-side "write"
+   path available to a non-slave.
+
+5. **Lowest bus address owns the setpoint.** For the temperature
+   setpoint (coil 12 / reg `0x000C`), the CS60 honours the write only
+   from the *lowest* registered bus address; a higher address is read
+   but then restamped with the value held by the lower one. The CI60
+   panel pot is at addr 2, so a slave must sit at addr 1 to override
+   it. MODE (coil 0) is not subject to this rule — it works from any
+   registered address. See §5.4.
 
 3. **CS60 tolerates missed FC01 responses.** A registered slave
    that fails to respond to one or both FC01 reqs is not

@@ -379,6 +379,57 @@ func cmdMode(modeArg string) {
 	}
 }
 
+// cmdSetpoint connects, sends "setpoint <C>" over NUS RX (queueing a setpoint
+// command on the Modbus slave: coil 12 + reg 0x000C), and prints the one-line
+// ack. C is °C with an optional single decimal, e.g. "20" or "20.5"; the
+// firmware clamps to 10.0-30.0 C.
+func cmdSetpoint(spArg string) {
+	if v, err := strconv.ParseFloat(spArg, 64); err != nil || v < 0 {
+		log.Fatalf("setpoint: bad arg %q — must be a temperature in °C, e.g. 20.5", spArg)
+	}
+
+	sysbus, err := dbus.SystemBus()
+	must("system dbus", err)
+	registerPairingAgent(sysbus)
+
+	device := connectBLE()
+	defer device.Disconnect()
+
+	txChar, rxChar := openNUS(device)
+
+	notifyCh := make(chan []byte, 16)
+	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
+		b := make([]byte, len(buf))
+		copy(b, buf)
+		notifyCh <- b
+	}))
+
+	cmd := fmt.Sprintf("setpoint %s", spArg)
+	fmt.Printf("Sending %q...\n", cmd)
+	_, werr := rxChar.WriteWithoutResponse([]byte(cmd))
+	must("write setpoint", werr)
+
+	var line []byte
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case chunk := <-notifyCh:
+			line = append(line, chunk...)
+			if i := indexByte(line, '\n'); i >= 0 {
+				fmt.Print(string(line[:i+1]))
+				return
+			}
+		case <-deadline:
+			if len(line) > 0 {
+				fmt.Println(strings.TrimRight(string(line), "\r\n"))
+			} else {
+				log.Fatal("Timeout waiting for setpoint ack")
+			}
+			return
+		}
+	}
+}
+
 // cmdZbReset connects, sends "zbreset" over NUS RX, prints the one-line ack,
 // then disconnects. The firmware leaves its Zigbee network, clears NVRAM and
 // reboots a second or so later, so on the next boot it scans for and joins an
@@ -642,12 +693,13 @@ func usage() {
   %s stream <output.bin>   — Stream live RS485 traffic to file (Ctrl-C to stop)
   %s state [--human-friendly]  — Print decoded panel state; --human-friendly for verbose multiline output
   %s mode <0|1|2|3>        — Queue a CMD_MODE change (Stop/Min/Normal/Max)
+  %s setpoint <°C>         — Queue a temperature setpoint change (e.g. 20.5; clamped 10-30 °C)
   %s zbreset               — Zigbee factory reset: leave network, clear NVRAM, reboot to re-pair
   %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
   %s scan                  — Scan and print RSSI for flexitMC (Ctrl-C to stop)
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -685,6 +737,11 @@ func main() {
 			usage()
 		}
 		cmdMode(os.Args[2])
+	case "setpoint":
+		if len(os.Args) < 3 {
+			usage()
+		}
+		cmdSetpoint(os.Args[2])
 	case "zbreset":
 		cmdZbReset()
 	case "list":
