@@ -105,6 +105,11 @@ void ble_transport_ensure_advertising(void)
     }
 }
 
+bool ble_transport_is_connected(void)
+{
+    return current_conn != NULL;
+}
+
 static void adv_restart_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);

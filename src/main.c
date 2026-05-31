@@ -10,6 +10,8 @@
 
 static const struct gpio_dt_spec green_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+static const struct gpio_dt_spec blue_led =
+    GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
 
 /* Status-LED timing. The loop ticks at the fast-blink period; the slower
  * cadences are multiples of it. */
@@ -22,6 +24,7 @@ int main(void)
     printk("flexit-cs60-control starting.\n");
 
     gpio_pin_configure_dt(&green_led, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&blue_led, GPIO_OUTPUT_INACTIVE);
 
     if (rs485_uart_init() < 0) {
         printk("warning: RS485 UART init failed — continuing without RS485 receive\n");
@@ -40,10 +43,13 @@ int main(void)
 
     (void)flexit_bridge_init();
 
-    /* Status LED (green):
-     *   - Zigbee join window open  -> fast blink (toggle every 100 ms)
-     *   - Zigbee joined            -> solid on
-     *   - otherwise                -> slow blink (toggle every 1 s)
+    /* Status LEDs:
+     *   green (Zigbee):
+     *     - Zigbee join window open  -> fast blink (toggle every 100 ms)
+     *     - Zigbee joined            -> solid on
+     *     - otherwise                -> slow blink (toggle every 1 s)
+     *   blue (BLE):
+     *     - solid on while a central is connected, else off
      */
     for (uint32_t tick = 0;; tick++) {
         switch (zigbee_ep_net_state()) {
@@ -60,6 +66,9 @@ int main(void)
             }
             break;
         }
+
+        /* Blue LED: solid on while a BLE central is connected, else off. */
+        gpio_pin_set_dt(&blue_led, ble_transport_is_connected() ? 1 : 0);
 
         if (tick % ADV_ENSURE_TICKS == 0) {
             ble_transport_ensure_advertising();

@@ -1,6 +1,7 @@
 #ifndef FLEXITMC_BLE_TRANSPORT_H_
 #define FLEXITMC_BLE_TRANSPORT_H_
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -14,6 +15,11 @@ int ble_transport_init(void);
 
 /* Idempotent: starts advertising if no BLE connection is currently up. */
 void ble_transport_ensure_advertising(void);
+
+/* True while a central is connected. Intended for a status LED; the read is a
+ * lock-free snapshot of the connection pointer, so it may momentarily lag a
+ * connect/disconnect that is in flight. */
+bool ble_transport_is_connected(void);
 
 /* Forward raw RS485 bytes over NUS TX if a client has requested streaming
  * (sent the "stream" command). Called from the rs485_uart drain work handler
