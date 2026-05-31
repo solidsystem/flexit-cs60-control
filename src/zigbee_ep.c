@@ -173,7 +173,7 @@ ZB_ZCL_DECLARE_IDENTIFY_ATTRIB_LIST(
  * escape (e.g. "\x09f..." would parse as 0x9f).
  */
 static zb_char_t basic_mf_name[]  = "\x0b" "SolidSystem";  /* 11 chars */
-static zb_char_t basic_model_id[] = "\x08" "flexitMC";    /*  8 chars */
+static zb_char_t basic_model_id[] = "\x13" "flexit-cs60-control";  /* 19 chars */
 
 /* Basic cluster by hand so it carries ManufacturerName + ModelIdentifier (used
  * by HA for the device name and by Z2M to match an external converter).

@@ -1,4 +1,4 @@
-# flexitMC
+# flexit-cs60-control
 
 ## Project goal
 

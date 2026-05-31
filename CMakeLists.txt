@@ -10,7 +10,7 @@ endif()
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
-project(flexitMC)
+project(flexit-cs60-control)
 
 # ZBOSS's built-in "include all ZCL clusters" set (ncs-zigbee zb_vendor.h) omits
 # Analog Input, so its server (zcl_analog_input.c) is not compiled and its

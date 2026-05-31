@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	deviceName   = "flexitMC"
+	deviceName   = "flexit-cs60-control"
 	fixedPasskey = uint32(444999)
-	agentPath    = dbus.ObjectPath("/flexitmc/agent")
+	agentPath    = dbus.ObjectPath("/flexit_cs60_control/agent")
 )
 
 var adapter = bluetooth.DefaultAdapter
@@ -698,7 +698,7 @@ func usage() {
   %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
-  %s scan                  — Scan and print RSSI for flexitMC (Ctrl-C to stop)
+  %s scan                  — Scan and print RSSI for flexit-cs60-control (Ctrl-C to stop)
 `, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }

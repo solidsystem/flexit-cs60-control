@@ -1,4 +1,4 @@
-"""ZHA (Home Assistant) quirk for the flexitMC bridge.
+"""ZHA (Home Assistant) quirk for the flexit-cs60-control bridge.
 
 Scope: this quirk only adds the **writable temperature setpoint**. The firmware
 models it as an Analog Value (0x000E) cluster; ZHA has no auto-discovery for
@@ -40,7 +40,7 @@ Install (Home Assistant):
   2. Point ZHA at that directory once, in configuration.yaml:
          zha:
            custom_quirks_path: /config/custom_zha_quirks/
-  3. Restart Home Assistant. The setpoint Number appears on the flexitMC device
+  3. Restart Home Assistant. The setpoint Number appears on the flexit-cs60-control device
      (the EP5/EP6 "%" sensors come from native discovery, with or without this
      quirk). If it doesn't show after the restart, remove and re-add
      (re-interview) the device so ZHA rebuilds its entities against the
@@ -54,7 +54,7 @@ from zigpy.zcl.clusters.general import AnalogValue
 # Basic cluster ManufacturerName / ModelIdentifier reported by the firmware
 # (src/zigbee_ep.c: basic_mf_name / basic_model_id).
 MANUFACTURER = "SolidSystem"
-MODEL = "flexitMC"
+MODEL = "flexit-cs60-control"
 
 # Analog Value endpoint declared in src/zigbee_ep.c.
 EP_SETPOINT = 7
