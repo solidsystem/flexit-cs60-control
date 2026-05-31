@@ -8,6 +8,8 @@
 #include "rs485_uart.h"
 #include "zigbee_ep.h"
 
+static const struct gpio_dt_spec red_led =
+    GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct gpio_dt_spec green_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 static const struct gpio_dt_spec blue_led =
@@ -23,27 +25,47 @@ int main(void)
 {
     printk("flexit-cs60-control starting.\n");
 
+    gpio_pin_configure_dt(&red_led, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&green_led, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&blue_led, GPIO_OUTPUT_INACTIVE);
 
+    /* Latch any init failure so the red LED can flag it below. Each subsystem
+     * still runs best-effort (we don't bail out), so a single failure doesn't
+     * take down the others — the LED is the operator's signal that something
+     * came up degraded. */
+    bool init_failed = false;
+
     if (rs485_uart_init() < 0) {
         printk("warning: RS485 UART init failed — continuing without RS485 receive\n");
+        init_failed = true;
     }
 
-    (void)flexit_slave_init();
+    if (flexit_slave_init() < 0) {
+        printk("warning: Flexit Modbus slave init failed\n");
+        init_failed = true;
+    }
 
     if (ble_transport_init() < 0) {
         printk("error: BLE transport init failed\n");
-        return -1;
+        init_failed = true;
     }
 
     if (zigbee_ep_init() < 0) {
         printk("warning: Zigbee init failed — continuing with BLE only\n");
+        init_failed = true;
     }
 
-    (void)flexit_bridge_init();
+    if (flexit_bridge_init() < 0) {
+        printk("warning: Flexit bridge init failed\n");
+        init_failed = true;
+    }
+
+    /* Red LED: solid on if any subsystem failed to initialise. */
+    gpio_pin_set_dt(&red_led, init_failed ? 1 : 0);
 
     /* Status LEDs:
+     *   red:
+     *     - solid on if any subsystem init failed (set once, above)
      *   green (Zigbee):
      *     - Zigbee join window open  -> fast blink (toggle every 100 ms)
      *     - Zigbee joined            -> solid on
