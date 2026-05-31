@@ -42,6 +42,15 @@ source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
 nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- <command>
 ```
 
+The firmware build requires the BLE pairing passkey in the environment — it is
+baked into the image at build time and the build fails (CMake `FATAL_ERROR`) if
+it is unset. Export it (a 6-digit number) before building; the toolchain wrapper
+inherits the environment:
+
+```bash
+export FLEXIT_CS60_CONTROL_BLE_KEY=444999
+```
+
 ## Common Commands
 
 ```bash
@@ -95,11 +104,17 @@ flash/CBOR/CRC deps) so the *next* update has an SMP server to talk to.
 
 A Go CLI tool that connects to the xiao_ble over BLE using an nrf52840dk running
 `hci_usb` as the HCI adapter (appears as `hci0` in BlueZ). Handles BLE pairing
-automatically with fixed passkey `444999`.
+automatically using the passkey from the `FLEXIT_CS60_CONTROL_BLE_KEY`
+environment variable (a 6-digit number) — the same variable the firmware bakes
+in at build time. Every connecting subcommand exits with an error if it is unset
+(`scan` does not pair, so it does not need it).
 
 ```bash
 cd tools/ble-client
 go build -o ble-client .
+
+# Required for any subcommand that pairs (state, mode, flash, …):
+export FLEXIT_CS60_CONTROL_BLE_KEY=444999
 ```
 
 ### Subcommands

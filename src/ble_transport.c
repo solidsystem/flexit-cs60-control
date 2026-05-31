@@ -21,7 +21,21 @@
 
 #include <bluetooth/services/nus.h>
 
-#define FIXED_PASSKEY 444999u
+/*
+ * BLE pairing passkey, injected at build time from $FLEXIT_CS60_CONTROL_BLE_KEY
+ * via CMake (-DFLEXIT_BLE_PASSKEY="<6 digits>"). It is parsed from a string
+ * rather than used as a bare integer so a leading zero is not read as octal.
+ * The CMake build fails when the environment variable is unset, so this guard
+ * only ever trips on a build that bypasses CMakeLists.txt.
+ */
+#ifndef FLEXIT_BLE_PASSKEY
+#error "FLEXIT_BLE_PASSKEY undefined: set FLEXIT_CS60_CONTROL_BLE_KEY at build time"
+#endif
+
+static uint32_t fixed_passkey(void)
+{
+    return (uint32_t)strtoul(FLEXIT_BLE_PASSKEY, NULL, 10);
+}
 
 static struct bt_conn *current_conn;
 
@@ -170,9 +184,11 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 static uint32_t auth_app_passkey(struct bt_conn *conn)
 {
     char addr[BT_ADDR_LE_STR_LEN];
+    uint32_t passkey = fixed_passkey();
+
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-    printk("BLE passkey for %s: %06u\n", addr, FIXED_PASSKEY);
-    return FIXED_PASSKEY;
+    printk("BLE passkey for %s: %06u\n", addr, passkey);
+    return passkey;
 }
 
 static void auth_cancel(struct bt_conn *conn)
@@ -523,7 +539,7 @@ int ble_transport_init(void)
 
     advertising_start();
 
-    printk("BLE up: name='%s', fixed passkey=%06u, security required=L3\n",
-           CONFIG_BT_DEVICE_NAME, FIXED_PASSKEY);
+    printk("BLE up: name='%s', passkey=%06u, security required=L3\n",
+           CONFIG_BT_DEVICE_NAME, fixed_passkey());
     return 0;
 }

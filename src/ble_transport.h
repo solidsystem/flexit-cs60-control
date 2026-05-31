@@ -7,7 +7,7 @@
 /* Bring up BLE peripheral with:
  *   - SMP-over-BT service for DFU (authenticated/paired access only).
  *   - Nordic UART Service for commands and RS485 data streaming.
- *   - Fixed passkey for pairing; security level L3 forced on connect.
+ *   - Build-time passkey for pairing; security level L3 forced on connect.
  * Returns 0 on success, negative errno on failure.
  */
 int ble_transport_init(void);
