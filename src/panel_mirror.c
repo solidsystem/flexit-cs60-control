@@ -255,3 +255,15 @@ void panel_mirror_snapshot(struct panel_mirror_state *out)
     memcpy(out, &state, sizeof(*out));
     k_mutex_unlock(&state_mutex);
 }
+
+bool panel_mirror_cs60_link_up(uint32_t stale_ms)
+{
+    k_mutex_lock(&state_mutex, K_FOREVER);
+    uint64_t last = state.last_fc10_uptime_ms;
+    k_mutex_unlock(&state_mutex);
+
+    if (last == 0) {
+        return false; /* no FC10 broadcast decoded since boot */
+    }
+    return ((uint64_t)k_uptime_get() - last) <= (uint64_t)stale_ms;
+}

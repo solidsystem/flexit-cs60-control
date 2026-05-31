@@ -70,4 +70,10 @@ void panel_mirror_feed(const uint8_t *data, size_t len);
 /* Atomic copy of the current mirror into *out. Thread-safe. */
 void panel_mirror_snapshot(struct panel_mirror_state *out);
 
+/* True if a valid FC10 status broadcast from the CS60 has been decoded within
+ * the last `stale_ms` milliseconds — i.e. the RS485 link to the CS60 is live.
+ * Returns false before the first frame is ever seen (e.g. miswired bus, wrong
+ * baud, or no CS60). Thread-safe; intended for a link-status LED. */
+bool panel_mirror_cs60_link_up(uint32_t stale_ms);
+
 #endif /* FLEXITMC_PANEL_MIRROR_H_ */

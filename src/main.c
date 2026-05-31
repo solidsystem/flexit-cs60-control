@@ -5,6 +5,7 @@
 #include "ble_transport.h"
 #include "flexit_bridge.h"
 #include "flexit_slave.h"
+#include "panel_mirror.h"
 #include "rs485_uart.h"
 #include "zigbee_ep.h"
 
@@ -19,7 +20,14 @@ static const struct gpio_dt_spec blue_led =
  * cadences are multiples of it. */
 #define LED_TICK_MS          100   /* loop period == fast (joining) blink step */
 #define LED_SLOW_BLINK_TICKS 10    /* idle blink: toggle every 1 s            */
+#define RED_BLINK_TICKS      5     /* RS485-fault blink: toggle every 500 ms   */
 #define ADV_ENSURE_TICKS     10    /* re-check advertising about once a second */
+
+/* The CS60 broadcasts its FC10 status frame continuously (well under a second
+ * apart). Treat the RS485 link as down if no valid frame has arrived for this
+ * long — generous enough to ride out occasional CRC drops, short enough that a
+ * pulled cable or wrong wiring shows on the LED within a few seconds. */
+#define RS485_CS60_STALE_MS  5000
 
 int main(void)
 {
@@ -60,12 +68,13 @@ int main(void)
         init_failed = true;
     }
 
-    /* Red LED: solid on if any subsystem failed to initialise. */
-    gpio_pin_set_dt(&red_led, init_failed ? 1 : 0);
 
     /* Status LEDs:
-     *   red:
-     *     - solid on if any subsystem init failed (set once, above)
+     *   red (fault):
+     *     - solid on if any subsystem init failed
+     *     - else blink (500 ms) if the RS485 link to the CS60 is down
+     *       (no recent FC10 frame — miswired/unpaired bus or CS60 absent)
+     *     - else off
      *   green (Zigbee):
      *     - Zigbee join window open  -> fast blink (toggle every 100 ms)
      *     - Zigbee joined            -> solid on
@@ -74,6 +83,17 @@ int main(void)
      *     - solid on while a central is connected, else off
      */
     for (uint32_t tick = 0;; tick++) {
+        /* Red: init failure is latched-solid and outranks the link-down blink. */
+        if (init_failed) {
+            gpio_pin_set_dt(&red_led, 1);
+        } else if (!panel_mirror_cs60_link_up(RS485_CS60_STALE_MS)) {
+            if (tick % RED_BLINK_TICKS == 0) {
+                gpio_pin_toggle_dt(&red_led);
+            }
+        } else {
+            gpio_pin_set_dt(&red_led, 0);
+        }
+
         switch (zigbee_ep_net_state()) {
         case ZIGBEE_NET_JOINING:
             gpio_pin_toggle_dt(&green_led);
