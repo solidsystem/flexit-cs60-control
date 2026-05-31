@@ -42,6 +42,7 @@
 #include <zcl/zb_zcl_fan_control.h>
 #include <zcl/zb_zcl_analog_input.h>
 #include <zcl/zb_zcl_analog_value.h>
+#include <zcl/zb_zcl_binary_input.h>
 #include <ha/zb_ha_device_config.h>
 #include <zigbee/zigbee_error_handler.h>
 #include <zigbee/zigbee_app_utils.h>
@@ -137,6 +138,8 @@ static struct {
 	int64_t temp_last_ms[ZIGBEE_TEMP_COUNT]; /* uptime of last fresh value; 0 = never */
 	float   analog_val[ZIGBEE_ANALOG_COUNT]; /* percentage, 0..100 */
 	bool    analog_dirty[ZIGBEE_ANALOG_COUNT];
+	bool    binary_val[ZIGBEE_BINARY_COUNT]; /* alarm flag, true = active */
+	bool    binary_dirty[ZIGBEE_BINARY_COUNT];
 	float   setpoint_val;     /* setpoint readback, °C */
 	bool    setpoint_dirty;
 	int64_t setpoint_hold_until; /* skip readback latch until this uptime (ms) */
@@ -161,8 +164,60 @@ static const uint8_t analog_ep_id[ZIGBEE_ANALOG_COUNT] = {
 	[ZIGBEE_ANALOG_INTAKE_TEMP]    = FLEXIT_AI_EP_INTAKE,
 };
 
+/* Each alarm Binary Input cluster is co-resident on one of the existing
+ * endpoints (see zigbee_ep.h); this maps the channel to that host endpoint. */
+static const uint8_t binary_ep_id[ZIGBEE_BINARY_COUNT] = {
+	[ZIGBEE_BINARY_SUPPLY_SENSOR]  = FLEXIT_TEMP_EP_SUPPLY,
+	[ZIGBEE_BINARY_OUTDOOR_SENSOR] = FLEXIT_AI_EP_INTAKE,
+	[ZIGBEE_BINARY_HEAT_EXCHANGER] = FLEXIT_AI_EP_HEAT_EXCH,
+	[ZIGBEE_BINARY_OVERHEAT]       = FLEXIT_AI_EP_HEATING,
+	[ZIGBEE_BINARY_FILTER]         = FLEXIT_CTRL_ENDPOINT,
+};
+
 /* ------------------------------------------------------------------------- */
-/* EP1 — Basic + Identify + Fan Control                                      */
+/* Co-resident alarm Binary Inputs (Basic)                                    */
+/*                                                                            */
+/* Each alarm is a ZCL Binary Input (0x000F) cluster added as an extra server */
+/* cluster on an endpoint that already carries something else — the           */
+/* 8-endpoint ZBOSS cap (CONFIG_ZB_MAX_EP_NUMBER, baked into the precompiled   */
+/* stack) leaves no room for one endpoint per alarm. ZHA discovers each Binary */
+/* Input independently as a binary_sensor, named from the Description (0x001C) */
+/* attribute, exactly as it names the Analog Inputs. PresentValue (boolean) is */
+/* reportable so HA gets push updates on the same publish tick; the values are */
+/* seeded false and refreshed by publish_tick().                               */
+/*                                                                            */
+/* FLEXIT_BI_DECL declares the per-endpoint attribute storage + attribute list;*/
+/* FLEXIT_BI_CLUSTER_DESC is the cluster-descriptor entry to drop into the     */
+/* host endpoint's cluster array. Both key off the same `name` token as the    */
+/* host endpoint so the symbols stay unique. Defined here so EP1 (filter) and  */
+/* the sensor endpoints below can all use them.                                */
+/* ------------------------------------------------------------------------- */
+#define FLEXIT_BI_DECL(name, bi_label)                                           \
+	static zb_char_t  name##_bi_desc[]   = bi_label;                             \
+	static zb_bool_t  name##_bi_present  = ZB_FALSE;                             \
+	static zb_bool_t  name##_bi_oos      = ZB_FALSE;                             \
+	static zb_uint8_t name##_bi_status   = ZB_ZCL_BINARY_INPUT_STATUS_FLAG_NORMAL; \
+	ZB_ZCL_START_DECLARE_ATTRIB_LIST_CLUSTER_REVISION(name##_bi_attrs, ZB_ZCL_BINARY_INPUT) \
+		ZB_ZCL_SET_ATTR_DESC_M(ZB_ZCL_ATTR_BINARY_INPUT_DESCRIPTION_ID, name##_bi_desc, \
+			ZB_ZCL_ATTR_TYPE_CHAR_STRING, ZB_ZCL_ATTR_ACCESS_READ_ONLY)            \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_BINARY_INPUT_OUT_OF_SERVICE_ID, &name##_bi_oos) \
+		ZB_ZCL_SET_ATTR_DESC_M(ZB_ZCL_ATTR_BINARY_INPUT_PRESENT_VALUE_ID, &name##_bi_present, \
+			ZB_ZCL_ATTR_TYPE_BOOL,                                          \
+			ZB_ZCL_ATTR_ACCESS_READ_ONLY | ZB_ZCL_ATTR_ACCESS_REPORTING)    \
+		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_BINARY_INPUT_STATUS_FLAG_ID, &name##_bi_status) \
+	ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST
+
+#define FLEXIT_BI_CLUSTER_DESC(name)                                             \
+	ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_BINARY_INPUT,                      \
+		ZB_ZCL_ARRAY_SIZE(name##_bi_attrs, zb_zcl_attr_t), name##_bi_attrs, \
+		ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID)
+
+/* Only present_value of the co-resident Binary Input is marked reportable, so
+ * each host endpoint's reporting context grows by exactly one slot. */
+#define FLEXIT_BI_REPORT_ATTR_COUNT 1
+
+/* ------------------------------------------------------------------------- */
+/* EP1 — Basic + Identify + Fan Control + filter-change Binary Input          */
 /* ------------------------------------------------------------------------- */
 ZB_ZCL_DECLARE_IDENTIFY_ATTRIB_LIST(
 	ctrl_identify_attrs,
@@ -199,6 +254,9 @@ ZB_ZCL_START_DECLARE_ATTRIB_LIST_CLUSTER_REVISION(ctrl_fan_attrs, ZB_ZCL_FAN_CON
 		&dev_ctx.fan_mode_seq)
 ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST;
 
+/* Filter-change alarm Binary Input, co-resident on the control endpoint. */
+FLEXIT_BI_DECL(ctrl, "\x0d" "Filter change");  /* 13 */
+
 static zb_zcl_cluster_desc_t ctrl_clusters[] = {
 	ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_BASIC,
 		ZB_ZCL_ARRAY_SIZE(ctrl_basic_attrs, zb_zcl_attr_t), ctrl_basic_attrs,
@@ -209,25 +267,30 @@ static zb_zcl_cluster_desc_t ctrl_clusters[] = {
 	ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_FAN_CONTROL,
 		ZB_ZCL_ARRAY_SIZE(ctrl_fan_attrs, zb_zcl_attr_t), ctrl_fan_attrs,
 		ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID),
+	FLEXIT_BI_CLUSTER_DESC(ctrl),
 };
 
-ZB_DECLARE_SIMPLE_DESC(3, 0);
-static zb_af_simple_desc_3_0_t simple_desc_ctrl = {
+ZB_DECLARE_SIMPLE_DESC(4, 0);
+static zb_af_simple_desc_4_0_t simple_desc_ctrl = {
 	FLEXIT_CTRL_ENDPOINT, ZB_AF_HA_PROFILE_ID, ZB_HA_THERMOSTAT_DEVICE_ID,
-	FLEXIT_DEVICE_VERSION, 0, 3, 0,
-	{ ZB_ZCL_CLUSTER_ID_BASIC, ZB_ZCL_CLUSTER_ID_IDENTIFY, ZB_ZCL_CLUSTER_ID_FAN_CONTROL },
+	FLEXIT_DEVICE_VERSION, 0, 4, 0,
+	{ ZB_ZCL_CLUSTER_ID_BASIC, ZB_ZCL_CLUSTER_ID_IDENTIFY, ZB_ZCL_CLUSTER_ID_FAN_CONTROL,
+	  ZB_ZCL_CLUSTER_ID_BINARY_INPUT },
 };
 
-ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_ctrl, 1 /* FanMode */);
+ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_ctrl,
+	1 /* FanMode */ + FLEXIT_BI_REPORT_ATTR_COUNT);
 ZB_AF_DECLARE_ENDPOINT_DESC(ctrl_ep, FLEXIT_CTRL_ENDPOINT, ZB_AF_HA_PROFILE_ID,
 	0, NULL,
 	ZB_ZCL_ARRAY_SIZE(ctrl_clusters, zb_zcl_cluster_desc_t), ctrl_clusters,
-	(zb_af_simple_desc_1_1_t *)&simple_desc_ctrl, 1, reporting_ctrl, 0, NULL);
+	(zb_af_simple_desc_1_1_t *)&simple_desc_ctrl,
+	1 + FLEXIT_BI_REPORT_ATTR_COUNT, reporting_ctrl, 0, NULL);
 
 /* ------------------------------------------------------------------------- */
-/* EP2 — Temperature Measurement (supply air)                                */
+/* EP2 — Temperature Measurement (supply air) + alarm Binary Input            */
 /* ------------------------------------------------------------------------- */
-ZB_DECLARE_SIMPLE_DESC(1, 0);
+/* Sensor endpoints now carry two server clusters (primary + Binary Input). */
+ZB_DECLARE_SIMPLE_DESC(2, 0);
 
 /* `label` is a ZCL character string: a length-prefix byte then the text, the
  * length byte in its own literal so the next char can't be eaten by the \x
@@ -236,7 +299,7 @@ ZB_DECLARE_SIMPLE_DESC(1, 0);
  * ZB_ZCL_DECLARE_TEMP_MEASUREMENT_ATTRIB_LIST) so it can carry the extra
  * FLEXIT_ATTR_TEMP_LABEL_ID string alongside the four standard attributes.
  */
-#define FLEXIT_TEMP_EP(name, ep_id, label)                                       \
+#define FLEXIT_TEMP_EP(name, ep_id, label, bi_label)                             \
 	static zb_int16_t  name##_value = ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_UNKNOWN; \
 	static zb_int16_t  name##_min   = FLEXIT_TEMP_MIN_CC;                         \
 	static zb_int16_t  name##_max   = FLEXIT_TEMP_MAX_CC;                         \
@@ -250,22 +313,27 @@ ZB_DECLARE_SIMPLE_DESC(1, 0);
 		ZB_ZCL_SET_ATTR_DESC_M(FLEXIT_ATTR_TEMP_LABEL_ID, name##_label,               \
 			ZB_ZCL_ATTR_TYPE_CHAR_STRING, ZB_ZCL_ATTR_ACCESS_READ_ONLY)          \
 	ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST;                                           \
+	FLEXIT_BI_DECL(name, bi_label);                                              \
 	static zb_zcl_cluster_desc_t name##_clusters[] = {                          \
 		ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,             \
 			ZB_ZCL_ARRAY_SIZE(name##_attrs, zb_zcl_attr_t), name##_attrs,  \
 			ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID),        \
+		FLEXIT_BI_CLUSTER_DESC(name),                                       \
 	};                                                                          \
-	static zb_af_simple_desc_1_0_t simple_desc_##name = {                        \
+	static zb_af_simple_desc_2_0_t simple_desc_##name = {                        \
 		ep_id, ZB_AF_HA_PROFILE_ID, ZB_HA_TEMPERATURE_SENSOR_DEVICE_ID,     \
-		FLEXIT_DEVICE_VERSION, 0, 1, 0, { ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT } }; \
+		FLEXIT_DEVICE_VERSION, 0, 2, 0,                                     \
+		{ ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT, ZB_ZCL_CLUSTER_ID_BINARY_INPUT } }; \
 	ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_##name,                         \
-		ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT);                         \
+		ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT + FLEXIT_BI_REPORT_ATTR_COUNT); \
 	ZB_AF_DECLARE_ENDPOINT_DESC(name##_ep, ep_id, ZB_AF_HA_PROFILE_ID, 0, NULL,  \
 		ZB_ZCL_ARRAY_SIZE(name##_clusters, zb_zcl_cluster_desc_t), name##_clusters, \
 		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
-		ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
+		ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT + FLEXIT_BI_REPORT_ATTR_COUNT, \
+		reporting_##name, 0, NULL)
 
-FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
+FLEXIT_TEMP_EP(supply, FLEXIT_TEMP_EP_SUPPLY, "\x06" "supply",
+	"\x18" "Supply air sensor faulty");  /* 24 */
 
 /* ------------------------------------------------------------------------- */
 /* EP4/EP5/EP6 — Analog Input (Basic), one cluster each                       */
@@ -297,7 +365,7 @@ FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
 /* "Intake air temperature" — the label we actually want — while still         */
 /* showing °C.                                                                 */
 /* ------------------------------------------------------------------------- */
-#define FLEXIT_AI_EP(name, ep_id, label, minval, maxval, res, units, app_type)   \
+#define FLEXIT_AI_EP(name, ep_id, label, minval, maxval, res, units, app_type, bi_label) \
 	static zb_char_t   name##_desc[]   = label;                                  \
 	static zb_single_t name##_present  = 0.0f;                                   \
 	static zb_single_t name##_min       = (minval);                              \
@@ -312,20 +380,24 @@ FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
 		name##_desc, &name##_max, &name##_min, &name##_oos, &name##_present, \
 		&name##_reliab, &name##_resolution, &name##_status, &name##_units,  \
 		&name##_app_type);                                                  \
+	FLEXIT_BI_DECL(name, bi_label);                                              \
 	static zb_zcl_cluster_desc_t name##_clusters[] = {                          \
 		ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,                \
 			ZB_ZCL_ARRAY_SIZE(name##_attrs, zb_zcl_attr_t), name##_attrs,  \
 			ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID),        \
+		FLEXIT_BI_CLUSTER_DESC(name),                                       \
 	};                                                                          \
-	static zb_af_simple_desc_1_0_t simple_desc_##name = {                        \
+	static zb_af_simple_desc_2_0_t simple_desc_##name = {                        \
 		ep_id, ZB_AF_HA_PROFILE_ID, ZB_HA_SIMPLE_SENSOR_DEVICE_ID,         \
-		FLEXIT_DEVICE_VERSION, 0, 1, 0, { ZB_ZCL_CLUSTER_ID_ANALOG_INPUT } }; \
+		FLEXIT_DEVICE_VERSION, 0, 2, 0,                                     \
+		{ ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, ZB_ZCL_CLUSTER_ID_BINARY_INPUT } }; \
 	ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_##name,                         \
-		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT);                            \
+		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT + FLEXIT_BI_REPORT_ATTR_COUNT); \
 	ZB_AF_DECLARE_ENDPOINT_DESC(name##_ep, ep_id, ZB_AF_HA_PROFILE_ID, 0, NULL,  \
 		ZB_ZCL_ARRAY_SIZE(name##_clusters, zb_zcl_cluster_desc_t), name##_clusters, \
 		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
-		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
+		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT + FLEXIT_BI_REPORT_ATTR_COUNT, \
+		reporting_##name, 0, NULL)
 
 /* As FLEXIT_AI_EP, but the ApplicationType (0x0100) attribute is deliberately
  * omitted from the attribute list. With no ApplicationType to report, ZHA's
@@ -339,7 +411,7 @@ FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
  * ZB_ZCL_DECLARE_ANALOG_INPUT_ATTRIB_LIST (DESCRIPTION..ENGINEERING_UNITS), just
  * without the trailing APPLICATION_TYPE.
  */
-#define FLEXIT_AI_EP_NO_APPTYPE(name, ep_id, label, minval, maxval, res, units)   \
+#define FLEXIT_AI_EP_NO_APPTYPE(name, ep_id, label, minval, maxval, res, units, bi_label) \
 	static zb_char_t   name##_desc[]   = label;                                  \
 	static zb_single_t name##_present  = 0.0f;                                   \
 	static zb_single_t name##_min       = (minval);                              \
@@ -360,30 +432,37 @@ FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
 		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_STATUS_FLAGS_ID, &name##_status)   \
 		ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_INPUT_ENGINEERING_UNITS_ID, &name##_units) \
 	ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST;                                           \
+	FLEXIT_BI_DECL(name, bi_label);                                              \
 	static zb_zcl_cluster_desc_t name##_clusters[] = {                          \
 		ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,                \
 			ZB_ZCL_ARRAY_SIZE(name##_attrs, zb_zcl_attr_t), name##_attrs,  \
 			ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID),        \
+		FLEXIT_BI_CLUSTER_DESC(name),                                       \
 	};                                                                          \
-	static zb_af_simple_desc_1_0_t simple_desc_##name = {                        \
+	static zb_af_simple_desc_2_0_t simple_desc_##name = {                        \
 		ep_id, ZB_AF_HA_PROFILE_ID, ZB_HA_SIMPLE_SENSOR_DEVICE_ID,         \
-		FLEXIT_DEVICE_VERSION, 0, 1, 0, { ZB_ZCL_CLUSTER_ID_ANALOG_INPUT } }; \
+		FLEXIT_DEVICE_VERSION, 0, 2, 0,                                     \
+		{ ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, ZB_ZCL_CLUSTER_ID_BINARY_INPUT } }; \
 	ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_##name,                         \
-		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT);                            \
+		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT + FLEXIT_BI_REPORT_ATTR_COUNT); \
 	ZB_AF_DECLARE_ENDPOINT_DESC(name##_ep, ep_id, ZB_AF_HA_PROFILE_ID, 0, NULL,  \
 		ZB_ZCL_ARRAY_SIZE(name##_clusters, zb_zcl_cluster_desc_t), name##_clusters, \
 		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
-		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
+		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT + FLEXIT_BI_REPORT_ATTR_COUNT, \
+		reporting_##name, 0, NULL)
 
 /* Intake air temperature (°C). No ApplicationType (see FLEXIT_AI_EP_NO_APPTYPE)
  * so ZHA shows °C from EngineeringUnits with a null device_class.
  */
 FLEXIT_AI_EP_NO_APPTYPE(intake, FLEXIT_AI_EP_INTAKE, "\x16" "Intake air temperature", /* 22 */
-	FLEXIT_AI_TEMP_MIN_C, FLEXIT_AI_TEMP_MAX_C, 0.1f, FLEXIT_AI_UNITS_DEGC);
+	FLEXIT_AI_TEMP_MIN_C, FLEXIT_AI_TEMP_MAX_C, 0.1f, FLEXIT_AI_UNITS_DEGC,
+	"\x19" "Outdoor air sensor faulty");  /* 25 */
 FLEXIT_AI_EP(heat_exch, FLEXIT_AI_EP_HEAT_EXCH, "\x0e" "Heat exchanger",   /* 14 */
-	0.0f, 100.0f, 1.0f, FLEXIT_AI_UNITS_PERCENT, ZB_ZCL_AI_PERCENTAGE_OTHER);
+	0.0f, 100.0f, 1.0f, FLEXIT_AI_UNITS_PERCENT, ZB_ZCL_AI_PERCENTAGE_OTHER,
+	"\x15" "Heat exchanger faulty");  /* 21 */
 FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x0f" "Heating element",  /* 15 */
-	0.0f, 100.0f, 1.0f, FLEXIT_AI_UNITS_PERCENT, ZB_ZCL_AI_PERCENTAGE_OTHER);
+	0.0f, 100.0f, 1.0f, FLEXIT_AI_UNITS_PERCENT, ZB_ZCL_AI_PERCENTAGE_OTHER,
+	"\x12" "Overheat triggered");  /* 18 */
 
 /* ------------------------------------------------------------------------- */
 /* EP7 — Analog Value (Basic): writable temperature setpoint                  */
@@ -423,6 +502,7 @@ static zb_zcl_cluster_desc_t av_setpoint_clusters[] = {
 		ZB_ZCL_ARRAY_SIZE(av_setpoint_attrs, zb_zcl_attr_t), av_setpoint_attrs,
 		ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID),
 };
+ZB_DECLARE_SIMPLE_DESC(1, 0);
 static zb_af_simple_desc_1_0_t simple_desc_av_setpoint = {
 	FLEXIT_AV_EP_SETPOINT, ZB_AF_HA_PROFILE_ID, ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
 	FLEXIT_DEVICE_VERSION, 0, 1, 0, { ZB_ZCL_CLUSTER_ID_ANALOG_VALUE } };
@@ -559,6 +639,8 @@ static void publish_tick(zb_uint8_t param)
 	int64_t temp_last_ms[ZIGBEE_TEMP_COUNT];
 	float   analog_val[ZIGBEE_ANALOG_COUNT];
 	bool    analog_dirty[ZIGBEE_ANALOG_COUNT];
+	bool    binary_val[ZIGBEE_BINARY_COUNT];
+	bool    binary_dirty[ZIGBEE_BINARY_COUNT];
 	float   setpoint_val;
 	bool    setpoint_dirty;
 	uint8_t mode;
@@ -575,6 +657,11 @@ static void publish_tick(zb_uint8_t param)
 		analog_val[i] = pending.analog_val[i];
 		analog_dirty[i] = pending.analog_dirty[i];
 		pending.analog_dirty[i] = false;
+	}
+	for (int i = 0; i < ZIGBEE_BINARY_COUNT; i++) {
+		binary_val[i] = pending.binary_val[i];
+		binary_dirty[i] = pending.binary_dirty[i];
+		pending.binary_dirty[i] = false;
 	}
 	setpoint_val = pending.setpoint_val;
 	setpoint_dirty = pending.setpoint_dirty;
@@ -622,6 +709,17 @@ static void publish_tick(zb_uint8_t param)
 		}
 	}
 
+	for (int i = 0; i < ZIGBEE_BINARY_COUNT; i++) {
+		if (binary_dirty[i]) {
+			zb_bool_t pv = binary_val[i] ? ZB_TRUE : ZB_FALSE;
+			zb_zcl_set_attr_val(binary_ep_id[i],
+				ZB_ZCL_CLUSTER_ID_BINARY_INPUT,
+				ZB_ZCL_CLUSTER_SERVER_ROLE,
+				ZB_ZCL_ATTR_BINARY_INPUT_PRESENT_VALUE_ID,
+				(zb_uint8_t *)&pv, ZB_FALSE);
+		}
+	}
+
 	if (setpoint_dirty) {
 		zb_zcl_set_attr_val(FLEXIT_AV_EP_SETPOINT,
 			ZB_ZCL_CLUSTER_ID_ANALOG_VALUE,
@@ -665,6 +763,17 @@ void zigbee_ep_set_percent(enum zigbee_analog_channel ch, uint16_t percent)
 	k_mutex_lock(&pending_lock, K_FOREVER);
 	pending.analog_val[ch] = (float)percent;
 	pending.analog_dirty[ch] = true;
+	k_mutex_unlock(&pending_lock);
+}
+
+void zigbee_ep_set_binary(enum zigbee_binary_channel ch, bool active)
+{
+	if (ch >= ZIGBEE_BINARY_COUNT) {
+		return;
+	}
+	k_mutex_lock(&pending_lock, K_FOREVER);
+	pending.binary_val[ch] = active;
+	pending.binary_dirty[ch] = true;
 	k_mutex_unlock(&pending_lock);
 }
 
@@ -809,10 +918,10 @@ int zigbee_ep_init(void)
 
 	zigbee_enable();
 
-	LOG_INF("Zigbee data model started (EP1 fan + EP%d temp + EP%d/%d/%d analog + EP%d setpoint)",
+	LOG_INF("Zigbee data model started (EP1 fan + EP%d temp + EP%d/%d/%d analog + EP%d setpoint + %d alarm Binary Inputs)",
 		FLEXIT_TEMP_EP_SUPPLY,
 		FLEXIT_AI_EP_INTAKE, FLEXIT_AI_EP_HEAT_EXCH, FLEXIT_AI_EP_HEATING,
-		FLEXIT_AV_EP_SETPOINT);
+		FLEXIT_AV_EP_SETPOINT, ZIGBEE_BINARY_COUNT);
 
 	return 0;
 }

@@ -1,6 +1,7 @@
 #ifndef ZIGBEE_EP_H
 #define ZIGBEE_EP_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Zigbee data model for the flexit-cs60-control bridge (see smarthouse-integration.md).
@@ -40,6 +41,22 @@ enum zigbee_analog_channel {
 	ZIGBEE_ANALOG_COUNT,
 };
 
+/* Binary Input (alarm) channels — see binary_ep_id[] in zigbee_ep.c. Each is a
+ * ZCL Binary Input cluster carried *alongside* an existing endpoint's primary
+ * cluster: the 8-endpoint ZBOSS cap (CONFIG_ZB_MAX_EP_NUMBER) rules out a
+ * dedicated endpoint per alarm, so they ride on EP1/EP2/EP4/EP5/EP6. ZHA still
+ * discovers each Binary Input as its own binary_sensor, named from the cluster
+ * Description attribute.
+ */
+enum zigbee_binary_channel {
+	ZIGBEE_BINARY_SUPPLY_SENSOR = 0,  /* supply air sensor faulty  (EP2) */
+	ZIGBEE_BINARY_OUTDOOR_SENSOR,     /* outdoor air sensor faulty (EP4) */
+	ZIGBEE_BINARY_HEAT_EXCHANGER,     /* heat exchanger faulty     (EP5) */
+	ZIGBEE_BINARY_OVERHEAT,           /* overheat triggered        (EP6) */
+	ZIGBEE_BINARY_FILTER,             /* filter change             (EP1) */
+	ZIGBEE_BINARY_COUNT,
+};
+
 /* Invoked (in a Zephyr thread context, from the ZBOSS stack thread) when a
  * Zigbee client writes Fan Control FanMode. `flexit_mode` is 0..3
  * (Stop/Min/Normal/Max). flexit_bridge points this at flexit_slave_queue_mode();
@@ -76,6 +93,11 @@ void zigbee_ep_set_percent(enum zigbee_analog_channel ch, uint16_t percent);
  * Thread-safe.
  */
 void zigbee_ep_set_intake_temp(int16_t value_dc);
+
+/* Publish a Binary Input alarm flag for one channel (true = active/alarm).
+ * Thread-safe; no-op for a bad channel.
+ */
+void zigbee_ep_set_binary(enum zigbee_binary_channel ch, bool active);
 
 /* Publish the current Flexit mode (0..3) as Fan Control FanMode — use to
  * reflect the mode read back from the CS60. Thread-safe; no-op if mode > 3.

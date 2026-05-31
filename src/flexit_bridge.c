@@ -81,6 +81,18 @@ static void bridge_work_fn(struct k_work *work)
 		/* Setpoint readback: the committed value (0x00C2), already °C ×10. */
 		zigbee_ep_set_setpoint(st.temp_setpoint_2_x10);
 
+		/* Alarm flags (FC10 regs 0x0104..0x010C) -> Binary Input sensors. */
+		zigbee_ep_set_binary(ZIGBEE_BINARY_SUPPLY_SENSOR,
+			(st.alarms & PANEL_MIRROR_ALARM_SUPPLY_SENSOR) != 0);
+		zigbee_ep_set_binary(ZIGBEE_BINARY_OUTDOOR_SENSOR,
+			(st.alarms & PANEL_MIRROR_ALARM_OUTDOOR_SENSOR) != 0);
+		zigbee_ep_set_binary(ZIGBEE_BINARY_HEAT_EXCHANGER,
+			(st.alarms & PANEL_MIRROR_ALARM_HEAT_EXCHANGER) != 0);
+		zigbee_ep_set_binary(ZIGBEE_BINARY_OVERHEAT,
+			(st.alarms & PANEL_MIRROR_ALARM_OVERHEAT) != 0);
+		zigbee_ep_set_binary(ZIGBEE_BINARY_FILTER,
+			(st.alarms & PANEL_MIRROR_ALARM_FILTER) != 0);
+
 		if (st.mode <= 3) {
 			zigbee_ep_set_mode((uint8_t)st.mode);
 		}

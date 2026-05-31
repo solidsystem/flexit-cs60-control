@@ -33,6 +33,11 @@
  */
 #define TEMP_SENTINEL_MAX_X10 (-1000)
 
+/* Byte offset of a holding register inside the FC10 status block data region
+ * (reg 0x00BE is the first register, at offset 0). Used to reach the alarm
+ * registers (0x0104..0x010C) that sit later in the same 85-register block. */
+#define FC10_REG_OFF(reg) (((reg) - 0x00BE) * 2)
+
 static uint8_t accum[ACCUM_SIZE];
 static size_t  accum_len;
 
@@ -83,6 +88,26 @@ static bool try_decode_fc10(const uint8_t *frame)
         present |= PANEL_MIRROR_SENSOR_RETURN_WATER;
     }
     state.sensors_present = present;
+
+    /* Alarm registers later in the same block (0x0104..0x010C). Each is a
+     * 0/non-zero flag; collapse the subset we surface into a bitmask. */
+    uint8_t alarms = 0;
+    if (get_be16(regs + FC10_REG_OFF(0x0104))) {
+        alarms |= PANEL_MIRROR_ALARM_SUPPLY_SENSOR;
+    }
+    if (get_be16(regs + FC10_REG_OFF(0x0106))) {
+        alarms |= PANEL_MIRROR_ALARM_OUTDOOR_SENSOR;
+    }
+    if (get_be16(regs + FC10_REG_OFF(0x0108))) {
+        alarms |= PANEL_MIRROR_ALARM_OVERHEAT;
+    }
+    if (get_be16(regs + FC10_REG_OFF(0x010B))) {
+        alarms |= PANEL_MIRROR_ALARM_HEAT_EXCHANGER;
+    }
+    if (get_be16(regs + FC10_REG_OFF(0x010C))) {
+        alarms |= PANEL_MIRROR_ALARM_FILTER;
+    }
+    state.alarms = alarms;
 
     state.fc10_frames++;
     state.last_fc10_uptime_ms = (uint64_t)k_uptime_get();

@@ -33,6 +33,17 @@ struct panel_mirror_state {
 #define PANEL_MIRROR_SENSOR_EXTRACT_AIR  0x01
 #define PANEL_MIRROR_SENSOR_RETURN_WATER 0x02
 
+    /* Alarm/status registers carried later in the same FC10 block (each holding
+     * register is 0 = clear, non-zero = active). Only the subset surfaced over
+     * Zigbee is decoded; addresses from the ESPHome reference register map
+     * (REG_ALARM_* at 0x0104..0x010C). See flexit-cs60-communication.md. */
+    uint8_t  alarms;
+#define PANEL_MIRROR_ALARM_SUPPLY_SENSOR  0x01  /* 0x0104 supply air sensor faulty  */
+#define PANEL_MIRROR_ALARM_OUTDOOR_SENSOR 0x02  /* 0x0106 outdoor air sensor faulty */
+#define PANEL_MIRROR_ALARM_OVERHEAT       0x04  /* 0x0108 overheat triggered        */
+#define PANEL_MIRROR_ALARM_HEAT_EXCHANGER 0x08  /* 0x010B heat exchanger faulty     */
+#define PANEL_MIRROR_ALARM_FILTER         0x10  /* 0x010C filter change             */
+
     /* FC06 — sparse table of last-seen single-register writes. Populated
      * lazily; reused LRU on overflow.
      */
