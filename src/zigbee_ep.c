@@ -298,8 +298,8 @@ FLEXIT_TEMP_EP(outdoor,   FLEXIT_TEMP_EP_OUTDOOR,    "\x07" "outdoor");
 		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
 		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
 
-FLEXIT_AI_EP(heat_exch, FLEXIT_AI_EP_HEAT_EXCH, "\x0e" "heat_exchanger"); /* 14 */
-FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x07" "heating");        /*  7 */
+FLEXIT_AI_EP(heat_exch, FLEXIT_AI_EP_HEAT_EXCH, "\x0e" "Heat exchanger"); /* 14 */
+FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x0f" "Heating element"); /* 15 */
 
 /* ------------------------------------------------------------------------- */
 /* EP7 — Analog Value (Basic): writable temperature setpoint                  */

@@ -46,8 +46,8 @@ value, so every temperature and percentage needs its own endpoint. Layout:
 | EP1 | **Fan Control (0x0202)** — `FanMode` (rw, enum8) | server | **current mode (read) + set mode (write)** | fan / select |
 | EP2 | **Temperature Measurement (0x0402)** — `MeasuredValue` (r, int16, 0.01 °C) | server | supply air temp | sensor |
 | EP4 | Temperature Measurement (0x0402) | server | outdoor air temp | sensor |
-| EP5 | **Analog Input (0x000C)** — `PresentValue` (r, single/float, %) | server | heat-exchanger modulation | sensor (ZHA needs quirk) |
-| EP6 | Analog Input (0x000C) — `PresentValue` (r, single/float, %) | server | heating output | sensor (ZHA needs quirk) |
+| EP5 | **Analog Input (0x000C)** — `PresentValue` (r, single/float, %) | server | heat-exchanger modulation | sensor (native in ZHA ≥ 1.1) |
+| EP6 | Analog Input (0x000C) — `PresentValue` (r, single/float, %) | server | heating output | sensor (native in ZHA ≥ 1.1) |
 | EP7 | **Analog Value (0x000E)** — `PresentValue` (rw, single/float, °C) | server | temperature setpoint (read + **write**) | number (ZHA needs quirk) |
 
 EP3 (originally extract-air temperature) was removed; endpoint IDs are not renumbered.
@@ -78,11 +78,19 @@ ZBOSS does **not** compile the Analog Input server by default (its "include all 
 in `zb_vendor.h` omits it), so the firmware defines `ZB_ZCL_SUPPORT_CLUSTER_ANALOG_INPUT`
 image-wide in `CMakeLists.txt` to pull the cluster source in.
 
-**ZHA caveat:** ZHA does *not* auto-create an entity from a generic Analog Input cluster (its
-built-in handling is gated to specific manufacturers). The interview shows EP5/EP6, but no
-sensor appears until you install the quirk in `tools/zha-quirk/flexitmc.py` — a zigpy v2
-`QuirkBuilder` matching `SolidSystem`/`flexitMC` that exposes both `PresentValue`s as `%`
-sensors. (Z2M would instead need an external converter.)
+To make the percentages discoverable, the firmware also sets each Analog Input cluster's
+`Description` (0x001C, "Heat exchanger" / "Heating element") and `EngineeringUnits` (98 = percent) /
+`ApplicationType` (percentage) attributes.
+
+**ZHA discovery:** current ZHA (the `zha` library ≥ 1.1, HA 2024.x+) ships an *unrestricted*
+`AnalogInputSensor` that auto-discovers **any** Analog Input cluster carrying a `Description`
+attribute — it names the entity from that `Description` and units it from `ApplicationType` /
+`EngineeringUnits`. So EP5/EP6 now appear as native `%` sensors **without a quirk** (named
+"Heat exchanger" / "Heating element" from the firmware `Description`).
+Older ZHA gated Analog Input to specific manufacturers (e.g. LUMI) and needed a quirk; that is no
+longer the case, and defining these sensors in the quirk as well produces *duplicate* entities —
+so `tools/zha-quirk/flexitmc.py` deliberately leaves EP5/EP6 to native discovery. (Z2M would still
+need an external converter.)
 
 ### Analog Value writable setpoint (EP7)
 
@@ -106,16 +114,17 @@ from HA injects a setpoint change onto the RS485 bus.
   `flexit-cs60-communication.md` §5.4. Consequence: after a remote write the CI60's physical dial is
   out of sync with the actual setpoint (inherent to overriding a potentiometer); turning the dial
   still works since the XIAO only asserts coil 12 when a write is queued.
-- **ZHA caveat:** as with EP5/EP6, ZHA does not auto-expose a generic Analog Value cluster. The
-  quirk in `tools/zha-quirk/flexitmc.py` maps EP7 `PresentValue` to a `.number()` entity
-  (10–30 °C, 0.5 °C step).
+- **ZHA caveat:** ZHA has no native discovery for Analog Value (unlike Analog Input — see EP5/EP6),
+  so EP7 needs the quirk. `tools/zha-quirk/flexitmc.py` maps EP7 `PresentValue` to a `.number()`
+  entity (10–30 °C, 0.5 °C step). This is now the *only* thing the quirk defines.
 
 ### Attribute reporting
 
 Configure reporting on `MeasuredValue` (temps), `FanMode` (mode), and `PresentValue` (the
 EP5/EP6 percentages and the EP7 setpoint) — min/max interval + reportable change — so HA receives
-push updates instead of polling. For the quirk-defined Analog Input/Value entities, ZHA sets this
-up from the `reporting_config` in `tools/zha-quirk/flexitmc.py`.
+push updates instead of polling. For the quirk-defined EP7 setpoint Number, ZHA sets this up from
+the `reporting_config` in `tools/zha-quirk/flexitmc.py`; for the natively-discovered EP5/EP6
+Analog Input sensors, ZHA configures reporting from its own defaults.
 
 ---
 
@@ -162,10 +171,10 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
 
 - `flexit-cs60-communication.md` — reverse-engineered RS485/Modbus protocol.
 - `tools/ble-client` — existing BLE tooling (stream/state/mode/setpoint/flash).
-- `tools/zha-quirk/flexitmc.py` — ZHA v2 quirk exposing the EP5/EP6 Analog Input percentages as
-  `%` sensors and the EP7 Analog Value setpoint as a °C `number` (ZHA ignores generic Analog
-  Input/Value clusters otherwise). Drop into HA's `custom_quirks_path`; install notes are in the
-  file's docstring.
+- `tools/zha-quirk/flexitmc.py` — ZHA v2 quirk exposing the EP7 Analog Value setpoint as a °C
+  `number` (ZHA has no native Analog Value discovery). EP5/EP6 are left to ZHA's native Analog
+  Input discovery (defining them in the quirk too would duplicate them). Drop into HA's
+  `custom_quirks_path`; install notes are in the file's docstring.
 - `tools/zb-coordinator` — test Zigbee coordinator (ncs-zigbee `network_coordinator` + a static
   PM file) for the nrf52840dk; used to verify the end-device join. Build with
   `-DZEPHYR_EXTRA_MODULES=$HOME/ncs/v3.3.0/ncs-zigbee` (after `--`), flash with `west flash`.
