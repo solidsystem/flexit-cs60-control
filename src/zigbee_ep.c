@@ -867,6 +867,34 @@ void zigbee_ep_factory_reset(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Network status (for the main-loop status LED)                             */
+/*                                                                           */
+/* Updated from ZBOSS context in zboss_signal_handler() and read from the    */
+/* main thread via zigbee_ep_net_state(); atomic so no lock is needed.       */
+/* ------------------------------------------------------------------------- */
+static atomic_t net_state = ATOMIC_INIT(ZIGBEE_NET_IDLE);
+
+/* The join (pairing) window of an unjoined device is bounded by the default
+ * signal handler, which stops steering after CONFIG_ZIGBEE_DEV_REJOIN_TIMEOUT_MS
+ * (see prj.conf). This one-shot alarm, armed on DEVICE_FIRST_START, mirrors that
+ * deadline so the status LED leaves the fast "joining" blink when the window
+ * closes without a join. A join that lands first sets net_state to JOINED, so by
+ * then this only flips JOINING->IDLE (the atomic_cas no-ops in any other state).
+ */
+static void join_window_expire(zb_uint8_t param)
+{
+	ARG_UNUSED(param);
+	if (atomic_cas(&net_state, ZIGBEE_NET_JOINING, ZIGBEE_NET_IDLE)) {
+		LOG_INF("Zigbee join window closed without joining");
+	}
+}
+
+enum zigbee_net_state zigbee_ep_net_state(void)
+{
+	return (enum zigbee_net_state)atomic_get(&net_state);
+}
+
+/* ------------------------------------------------------------------------- */
 /* ZBOSS signal handling                                                     */
 /* ------------------------------------------------------------------------- */
 void zboss_signal_handler(zb_bufid_t bufid)
@@ -875,6 +903,7 @@ void zboss_signal_handler(zb_bufid_t bufid)
 
 	zb_zdo_app_signal_hdr_t *sig_hdr = NULL;
 	zb_zdo_app_signal_type_t sig = zb_get_app_signal(bufid, &sig_hdr);
+	zb_ret_t status = ZB_GET_APP_SIGNAL_STATUS(bufid);
 
 	/* Default handling: join/rejoin, steering, etc. The unjoined-device join
 	 * window is bounded by CONFIG_ZIGBEE_DEV_REJOIN_TIMEOUT_MS (see prj.conf):
@@ -882,6 +911,42 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	 * after that timeout, so an unjoined device only stays joinable for that
 	 * long after boot/zbreset rather than indefinitely. */
 	ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
+
+	/* Track the coarse network state that drives the status LED. */
+	switch (sig) {
+	case ZB_BDB_SIGNAL_DEVICE_FIRST_START:
+		/* Clean NVRAM: the device begins network steering and is open to
+		 * join any coordinator with permit-join. Show the pairing blink and
+		 * arm the window-close timer matching the library's steering stop. */
+		if (status == RET_OK) {
+			atomic_set(&net_state, ZIGBEE_NET_JOINING);
+			ZB_SCHEDULE_APP_ALARM(join_window_expire, 0,
+				ZB_TIME_ONE_SECOND *
+				(CONFIG_ZIGBEE_DEV_REJOIN_TIMEOUT_MS / 1000));
+		}
+		break;
+	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
+		/* Stored-network rejoin: joined iff RET_OK, otherwise idle while it
+		 * retries (a reboot-rejoin is not a pairing window, so never JOINING). */
+		atomic_set(&net_state,
+			   (status == RET_OK) ? ZIGBEE_NET_JOINED : ZIGBEE_NET_IDLE);
+		break;
+	case ZB_BDB_SIGNAL_STEERING:
+		/* Only a successful steering changes state to JOINED. A *failed*
+		 * steering must not clear JOINING — steering retries fire this signal
+		 * repeatedly during the window; join_window_expire() ends JOINING. */
+		if (status == RET_OK) {
+			atomic_set(&net_state, ZIGBEE_NET_JOINED);
+		}
+		break;
+	case ZB_ZDO_SIGNAL_LEAVE:
+	case ZB_NWK_SIGNAL_NO_ACTIVE_LINKS_LEFT:
+		/* Left the network or lost the parent — no longer connected. */
+		atomic_set(&net_state, ZIGBEE_NET_IDLE);
+		break;
+	default:
+		break;
+	}
 
 	/* Once a requested factory reset has produced the network-leave, the
 	 * NVRAM is cleared; reboot promptly so the next boot is a clean

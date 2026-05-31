@@ -11,6 +11,12 @@
 static const struct gpio_dt_spec green_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 
+/* Status-LED timing. The loop ticks at the fast-blink period; the slower
+ * cadences are multiples of it. */
+#define LED_TICK_MS          100   /* loop period == fast (joining) blink step */
+#define LED_SLOW_BLINK_TICKS 10    /* idle blink: toggle every 1 s            */
+#define ADV_ENSURE_TICKS     10    /* re-check advertising about once a second */
+
 int main(void)
 {
     printk("flexit-cs60-control starting.\n");
@@ -34,10 +40,32 @@ int main(void)
 
     (void)flexit_bridge_init();
 
-    while (true) {
-        gpio_pin_toggle_dt(&green_led);
-        ble_transport_ensure_advertising();
-        k_msleep(1000);
+    /* Status LED (green):
+     *   - Zigbee join window open  -> fast blink (toggle every 100 ms)
+     *   - Zigbee joined            -> solid on
+     *   - otherwise                -> slow blink (toggle every 1 s)
+     */
+    for (uint32_t tick = 0;; tick++) {
+        switch (zigbee_ep_net_state()) {
+        case ZIGBEE_NET_JOINING:
+            gpio_pin_toggle_dt(&green_led);
+            break;
+        case ZIGBEE_NET_JOINED:
+            gpio_pin_set_dt(&green_led, 1);
+            break;
+        case ZIGBEE_NET_IDLE:
+        default:
+            if (tick % LED_SLOW_BLINK_TICKS == 0) {
+                gpio_pin_toggle_dt(&green_led);
+            }
+            break;
+        }
+
+        if (tick % ADV_ENSURE_TICKS == 0) {
+            ble_transport_ensure_advertising();
+        }
+
+        k_msleep(LED_TICK_MS);
     }
 
     return 0;

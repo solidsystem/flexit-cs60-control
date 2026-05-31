@@ -57,6 +57,15 @@ enum zigbee_binary_channel {
 	ZIGBEE_BINARY_COUNT,
 };
 
+/* Coarse network state, polled by the main loop to drive the status LED.
+ * Updated from the ZBOSS signal handler; read via zigbee_ep_net_state().
+ */
+enum zigbee_net_state {
+	ZIGBEE_NET_IDLE = 0, /* not joined and the join window is closed       */
+	ZIGBEE_NET_JOINING,  /* unjoined, join (pairing) window currently open */
+	ZIGBEE_NET_JOINED,   /* joined to a coordinator's network             */
+};
+
 /* Invoked (in a Zephyr thread context, from the ZBOSS stack thread) when a
  * Zigbee client writes Fan Control FanMode. `flexit_mode` is 0..3
  * (Stop/Min/Normal/Max). flexit_bridge points this at flexit_slave_queue_mode();
@@ -128,5 +137,13 @@ void zigbee_ep_set_setpoint_write_handler(zigbee_ep_setpoint_write_cb_t cb);
  * device reboots a second or so later once the leave has been processed.
  */
 void zigbee_ep_factory_reset(void);
+
+/* Current coarse network state, for driving the status LED. Safe to call from
+ * any thread (backed by an atomic). The JOINING state spans only the bounded
+ * join/pairing window of an unjoined device (clean NVRAM / after zbreset),
+ * which closes after CONFIG_ZIGBEE_DEV_REJOIN_TIMEOUT_MS; a stored-network
+ * reboot-rejoin reports IDLE until it actually joins, never JOINING.
+ */
+enum zigbee_net_state zigbee_ep_net_state(void);
 
 #endif /* ZIGBEE_EP_H */
