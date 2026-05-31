@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* Zigbee data model for the flexitMC bridge (see smarthouse-integration.md).
+/* Zigbee data model for the flexit-cs60-control bridge (see smarthouse-integration.md).
  *
  * Endpoints:
  *   EP1  Basic + Identify + Fan Control  — current mode (read) + set mode (write)

@@ -13,7 +13,7 @@ static const struct gpio_dt_spec green_led =
 
 int main(void)
 {
-    printk("flexitMC starting.\n");
+    printk("flexit-cs60-control starting.\n");
 
     gpio_pin_configure_dt(&green_led, GPIO_OUTPUT_INACTIVE);
 

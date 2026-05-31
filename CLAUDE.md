@@ -132,7 +132,7 @@ go build -o ble-client .
 ./ble-client scan
 
 # Flash firmware over BLE via SMP (upload → test-mark → reset)
-./ble-client flash build/flexitMC/zephyr/zephyr.signed.bin
+./ble-client flash build/flexit-cs60-control/zephyr/zephyr.signed.bin
 
 # Confirm after reboot (run within ~60s of flash completing)
 ./ble-client confirm <hash-hex>
@@ -157,7 +157,7 @@ nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
 
 # 2. Flash over BLE (prints the hash and the confirm command to run next)
 cd tools/ble-client
-./ble-client flash ../../build/flexitMC/zephyr/zephyr.signed.bin
+./ble-client flash ../../build/flexit-cs60-control/zephyr/zephyr.signed.bin
 
 # 3. Confirm after device reboots (~10s)
 ./ble-client confirm <hash printed by flash>

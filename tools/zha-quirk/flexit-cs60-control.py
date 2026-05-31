@@ -35,7 +35,7 @@ displayed name.
 
 Install (Home Assistant):
   1. Copy this file into your ZHA custom-quirks directory, e.g.
-         /config/custom_zha_quirks/flexitmc.py
+         /config/custom_zha_quirks/flexit-cs60-control.py
      (create the directory if it does not exist).
   2. Point ZHA at that directory once, in configuration.yaml:
          zha:

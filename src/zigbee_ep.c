@@ -1,4 +1,4 @@
-/* Zigbee data model for the flexitMC bridge.
+/* Zigbee data model for the flexit-cs60-control bridge.
  *
  * A custom Zigbee end device:
  *   EP1  Basic + Identify + Fan Control (FanMode rw, reportable)
@@ -330,7 +330,7 @@ FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x0f" "Heating element",  /* 15
 /* -> setpoint_write_cb -> flexit_slave_queue_setpoint (coil 12 / reg 0x000C).*/
 /* PresentValue is marked reportable (overriding the canned RW-only descriptor)*/
 /* so panel-driven changes push to HA. EngineeringUnits = 62 (°C). ZHA does    */
-/* not auto-expose Analog Value, so tools/zha-quirk/flexitmc.py maps it to a   */
+/* not auto-expose Analog Value, so tools/zha-quirk/flexit-cs60-control.py maps it to a   */
 /* settable Number entity.                                                     */
 /* ------------------------------------------------------------------------- */
 static zb_char_t   av_setpoint_desc[]    = "\x08" "setpoint";

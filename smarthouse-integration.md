@@ -96,7 +96,7 @@ attribute — it names the entity from that `Description` and units it from `App
 "Heat exchanger" / "Heating element" from the firmware `Description`).
 Older ZHA gated Analog Input to specific manufacturers (e.g. LUMI) and needed a quirk; that is no
 longer the case, and defining these sensors in the quirk as well produces *duplicate* entities —
-so `tools/zha-quirk/flexitmc.py` deliberately leaves EP5/EP6 to native discovery. (Z2M would still
+so `tools/zha-quirk/flexit-cs60-control.py` deliberately leaves EP5/EP6 to native discovery. (Z2M would still
 need an external converter.)
 
 ### Analog Value writable setpoint (EP7)
@@ -122,7 +122,7 @@ from HA injects a setpoint change onto the RS485 bus.
   out of sync with the actual setpoint (inherent to overriding a potentiometer); turning the dial
   still works since the XIAO only asserts coil 12 when a write is queued.
 - **ZHA caveat:** ZHA has no native discovery for Analog Value (unlike Analog Input — see EP5/EP6),
-  so EP7 needs the quirk. `tools/zha-quirk/flexitmc.py` maps EP7 `PresentValue` to a `.number()`
+  so EP7 needs the quirk. `tools/zha-quirk/flexit-cs60-control.py` maps EP7 `PresentValue` to a `.number()`
   entity (10–30 °C, 0.5 °C step). This is now the *only* thing the quirk defines.
 
 ### Attribute reporting
@@ -130,7 +130,7 @@ from HA injects a setpoint change onto the RS485 bus.
 Configure reporting on `MeasuredValue` (temps), `FanMode` (mode), and `PresentValue` (the
 EP5/EP6 percentages and the EP7 setpoint) — min/max interval + reportable change — so HA receives
 push updates instead of polling. For the quirk-defined EP7 setpoint Number, ZHA sets this up from
-the `reporting_config` in `tools/zha-quirk/flexitmc.py`; for the natively-discovered EP5/EP6
+the `reporting_config` in `tools/zha-quirk/flexit-cs60-control.py`; for the natively-discovered EP5/EP6
 Analog Input sensors, ZHA configures reporting from its own defaults.
 
 ---
@@ -178,7 +178,7 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
 
 - `flexit-cs60-communication.md` — reverse-engineered RS485/Modbus protocol.
 - `tools/ble-client` — existing BLE tooling (stream/state/mode/setpoint/flash).
-- `tools/zha-quirk/flexitmc.py` — ZHA v2 quirk exposing the EP7 Analog Value setpoint as a °C
+- `tools/zha-quirk/flexit-cs60-control.py` — ZHA v2 quirk exposing the EP7 Analog Value setpoint as a °C
   `number` (ZHA has no native Analog Value discovery). EP5/EP6 are left to ZHA's native Analog
   Input discovery (defining them in the quirk too would duplicate them). Drop into HA's
   `custom_quirks_path`; install notes are in the file's docstring.
