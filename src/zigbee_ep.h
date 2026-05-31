@@ -8,10 +8,15 @@
  * Endpoints:
  *   EP1  Basic + Identify + Fan Control  — current mode (read) + set mode (write)
  *   EP2  Temperature Measurement         — supply air
- *   EP4  Temperature Measurement         — outdoor air
+ *   EP4  Analog Input (Basic)            — intake air temperature (°C)
  *   EP5  Analog Input (Basic)            — heat-exchanger modulation (%)
  *   EP6  Analog Input (Basic)            — heating output (%)
  *   EP7  Analog Value (Basic)            — temperature setpoint (read/write)
+ *
+ * EP4 is an Analog Input rather than a Temperature Measurement cluster so HA
+ * can give it a distinct entity name from its cluster Description ("Intake air
+ * temperature"); the Temperature Measurement cluster has no name attribute, so
+ * EP2/EP4 would otherwise both surface as a generic "Temperature".
  *
  * Cluster values are fed through the setters below from any thread; they are
  * latched and pushed into the ZCL attributes from the Zigbee stack thread
@@ -19,17 +24,19 @@
  * the RS485 decode (src/flexit_bridge.c).
  */
 
-/* Temperature channels — see temp_ep_id[] in zigbee_ep.c for the EP mapping. */
+/* Temperature Measurement channels — see temp_ep_id[] in zigbee_ep.c. */
 enum zigbee_temp_channel {
 	ZIGBEE_TEMP_SUPPLY = 0,  /* supply air   (EP2) */
-	ZIGBEE_TEMP_OUTDOOR,     /* outdoor air  (EP4) */
 	ZIGBEE_TEMP_COUNT,
 };
 
-/* Analog Input (percentage) channels — see analog_ep_id[] in zigbee_ep.c. */
+/* Analog Input channels — see analog_ep_id[] in zigbee_ep.c. The first two are
+ * percentages (PresentValue 0..100); the last is intake air temperature in °C.
+ */
 enum zigbee_analog_channel {
-	ZIGBEE_ANALOG_HEAT_EXCHANGER = 0, /* rotary HX modulation (EP5) */
-	ZIGBEE_ANALOG_HEATING,            /* heater output        (EP6) */
+	ZIGBEE_ANALOG_HEAT_EXCHANGER = 0, /* rotary HX modulation (EP5, %)   */
+	ZIGBEE_ANALOG_HEATING,            /* heater output        (EP6, %)   */
+	ZIGBEE_ANALOG_INTAKE_TEMP,        /* intake air temp      (EP4, °C)  */
 	ZIGBEE_ANALOG_COUNT,
 };
 
@@ -58,9 +65,17 @@ int zigbee_ep_init(void);
 void zigbee_ep_set_temperature(enum zigbee_temp_channel ch, int16_t centi_celsius);
 
 /* Publish a percentage reading (0..100) for one Analog Input channel as the
- * cluster's PresentValue (float). Thread-safe; no-op for a bad channel.
+ * cluster's PresentValue (float). Use only for the percentage channels
+ * (ZIGBEE_ANALOG_HEAT_EXCHANGER / ZIGBEE_ANALOG_HEATING). Thread-safe; no-op for
+ * a bad channel.
  */
 void zigbee_ep_set_percent(enum zigbee_analog_channel ch, uint16_t percent);
+
+/* Publish the intake-air temperature (EP4 Analog Input) as PresentValue, in
+ * tenths of a degree Celsius (°C ×10, matching the CS60 register encoding).
+ * Thread-safe.
+ */
+void zigbee_ep_set_intake_temp(int16_t value_dc);
 
 /* Publish the current Flexit mode (0..3) as Fan Control FanMode — use to
  * reflect the mode read back from the CS60. Thread-safe; no-op if mode > 3.

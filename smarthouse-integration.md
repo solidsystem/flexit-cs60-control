@@ -45,12 +45,19 @@ value, so every temperature and percentage needs its own endpoint. Layout:
 | EP1 | Basic (0x0000), Identify (0x0003) | server | device id / mfg / model | (device info) |
 | EP1 | **Fan Control (0x0202)** — `FanMode` (rw, enum8) | server | **current mode (read) + set mode (write)** | fan / select |
 | EP2 | **Temperature Measurement (0x0402)** — `MeasuredValue` (r, int16, 0.01 °C) | server | supply air temp | sensor |
-| EP4 | Temperature Measurement (0x0402) | server | outdoor air temp | sensor |
+| EP4 | **Analog Input (0x000C)** — `PresentValue` (r, single/float, °C) | server | intake (outdoor) air temp | sensor (native in ZHA ≥ 1.1) |
 | EP5 | **Analog Input (0x000C)** — `PresentValue` (r, single/float, %) | server | heat-exchanger modulation | sensor (native in ZHA ≥ 1.1) |
 | EP6 | Analog Input (0x000C) — `PresentValue` (r, single/float, %) | server | heating output | sensor (native in ZHA ≥ 1.1) |
 | EP7 | **Analog Value (0x000E)** — `PresentValue` (rw, single/float, °C) | server | temperature setpoint (read + **write**) | number (ZHA needs quirk) |
 
 EP3 (originally extract-air temperature) was removed; endpoint IDs are not renumbered.
+
+EP4 (intake air) uses an **Analog Input** cluster rather than Temperature Measurement so HA can
+give it a distinct entity name from the cluster's `Description` ("Intake air temperature"). The
+Temperature Measurement cluster has no name attribute, so EP2 and EP4 would otherwise both surface
+as a generic "Temperature". EP2 (supply) stays on Temperature Measurement (it keeps the
+stale → "unknown" sentinel; see below). The firmware sets EP4's `ApplicationType` to the BACnet
+temperature group and `EngineeringUnits = 62`, which ZHA maps to °C.
 
 **Mode mapping** (Flexit ↔ Fan Control `FanMode`):
 
@@ -158,12 +165,12 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
 - **Bridge or mesh down** (XIAO unplugged, out of range, or radio wedged): ZHA marks the whole
   device *unavailable* via its own availability tracking for mains-powered (rx-on) nodes — all
   entities go unavailable. No firmware action needed.
-- **Data source stale** (XIAO online on Zigbee, but the RS485/CS60 bus has gone silent): each
-  temperature channel publishes the ZCL invalid sentinel `0x8000` after 60 s
-  (`FLEXIT_TEMP_STALE_MS`) of no fresh reading, so HA shows those sensors as *unknown* rather than a
-  frozen value. They recover to live readings automatically when the bus resumes. FanMode, the
-  EP5/EP6 Analog Input percentages and the EP7 Analog Value setpoint have no ZCL invalid value, so a
-  stale mode/percentage/setpoint holds its last-known reading.
+- **Data source stale** (XIAO online on Zigbee, but the RS485/CS60 bus has gone silent): the EP2
+  supply-air **Temperature Measurement** channel publishes the ZCL invalid sentinel `0x8000` after
+  60 s (`FLEXIT_TEMP_STALE_MS`) of no fresh reading, so HA shows it as *unknown* rather than a
+  frozen value; it recovers automatically when the bus resumes. The Analog Input / Analog Value
+  endpoints (EP4 intake temp, EP5/EP6 percentages, EP7 setpoint) and FanMode have no ZCL invalid
+  value, so a stale reading on those holds its last-known value.
 
 ---
 

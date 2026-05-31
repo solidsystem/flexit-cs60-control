@@ -68,8 +68,9 @@ static void bridge_work_fn(struct k_work *work)
 		 */
 		zigbee_ep_set_temperature(ZIGBEE_TEMP_SUPPLY,
 			(int16_t)(st.temp_supply_air_x10 * 10));
-		zigbee_ep_set_temperature(ZIGBEE_TEMP_OUTDOOR,
-			(int16_t)(st.temp_outdoor_air_x10 * 10));
+
+		/* Intake (outdoor) air temp on an Analog Input EP (°C ×10). */
+		zigbee_ep_set_intake_temp(st.temp_outdoor_air_x10);
 
 		/* HX modulation + heater output, raw percentage 0..100. */
 		zigbee_ep_set_percent(ZIGBEE_ANALOG_HEAT_EXCHANGER,

@@ -3,16 +3,22 @@
  * A custom Zigbee end device:
  *   EP1  Basic + Identify + Fan Control (FanMode rw, reportable)
  *   EP2  Temperature Measurement  (supply air)
- *   EP4  Temperature Measurement  (outdoor air)
+ *   EP4  Analog Input (Basic)     (intake air temperature °C)
  *   EP5  Analog Input (Basic)     (heat-exchanger modulation %)
  *   EP6  Analog Input (Basic)     (heating output %)
  *   EP7  Analog Value (Basic)     (temperature setpoint, read/write)
 *
  * The endpoints are hand-declared (rather than via a canned HA device-type
- * macro) so EP1 can carry Fan Control and so the temperature endpoints
- * can share one simple-descriptor type — ZB_DECLARE_SIMPLE_DESC() typedefs a
- * struct keyed by the (in,out) cluster counts, so reusing a canned single-EP
- * macro three times would redefine the same struct.
+ * macro) so EP1 can carry Fan Control and so the endpoints can share one
+ * simple-descriptor type — ZB_DECLARE_SIMPLE_DESC() typedefs a struct keyed by
+ * the (in,out) cluster counts, so reusing a canned single-EP macro would
+ * redefine the same struct.
+ *
+ * EP4 carries intake air temperature on an Analog Input (not a Temperature
+ * Measurement) cluster so HA names it from the cluster Description; see
+ * zigbee_ep.h. Trade-off: Analog Input has no "invalid" sentinel, so unlike the
+ * EP2 supply temp it holds its last reading when the source goes stale rather
+ * than going "unknown".
  *
  * Values arrive through the public setters from arbitrary threads; they are
  * latched under a mutex and pushed into the ZCL attributes by publish_tick(),
@@ -48,14 +54,19 @@ LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
 /* --- Endpoint IDs --- */
 #define FLEXIT_CTRL_ENDPOINT      1   /* Basic + Identify + Fan Control */
 #define FLEXIT_TEMP_EP_SUPPLY     2
-#define FLEXIT_TEMP_EP_OUTDOOR    4   /* EP3 (extract air) removed */
+#define FLEXIT_AI_EP_INTAKE       4   /* Analog Input — intake air temp °C (was EP3 extract, removed) */
 #define FLEXIT_AI_EP_HEAT_EXCH    5   /* Analog Input — HX modulation %  */
 #define FLEXIT_AI_EP_HEATING      6   /* Analog Input — heating output % */
 #define FLEXIT_AV_EP_SETPOINT     7   /* Analog Value — temp setpoint (rw) */
 
 /* ZCL EngineeringUnits enum (BACnet-derived): 98 == "percent", 62 == "degrees C". */
 #define FLEXIT_AI_UNITS_PERCENT   98
+#define FLEXIT_AI_UNITS_DEGC      62
 #define FLEXIT_AV_UNITS_DEGC      62
+
+/* Analog Input intake-air temperature display range (°C). */
+#define FLEXIT_AI_TEMP_MIN_C      (-40.0f)
+#define FLEXIT_AI_TEMP_MAX_C      ( 80.0f)
 
 /* Setpoint clamp (°C ×10) applied to writes from a Zigbee client. */
 #define FLEXIT_SETPOINT_MIN_DC    100   /* 10.0 C */
@@ -142,12 +153,12 @@ static bool temp_stale[ZIGBEE_TEMP_COUNT];
 
 static const uint8_t temp_ep_id[ZIGBEE_TEMP_COUNT] = {
 	[ZIGBEE_TEMP_SUPPLY]  = FLEXIT_TEMP_EP_SUPPLY,
-	[ZIGBEE_TEMP_OUTDOOR] = FLEXIT_TEMP_EP_OUTDOOR,
 };
 
 static const uint8_t analog_ep_id[ZIGBEE_ANALOG_COUNT] = {
 	[ZIGBEE_ANALOG_HEAT_EXCHANGER] = FLEXIT_AI_EP_HEAT_EXCH,
 	[ZIGBEE_ANALOG_HEATING]        = FLEXIT_AI_EP_HEATING,
+	[ZIGBEE_ANALOG_INTAKE_TEMP]    = FLEXIT_AI_EP_INTAKE,
 };
 
 /* ------------------------------------------------------------------------- */
@@ -214,7 +225,7 @@ ZB_AF_DECLARE_ENDPOINT_DESC(ctrl_ep, FLEXIT_CTRL_ENDPOINT, ZB_AF_HA_PROFILE_ID,
 	(zb_af_simple_desc_1_1_t *)&simple_desc_ctrl, 1, reporting_ctrl, 0, NULL);
 
 /* ------------------------------------------------------------------------- */
-/* EP2/EP4 — Temperature Measurement (one cluster each)                      */
+/* EP2 — Temperature Measurement (supply air)                                */
 /* ------------------------------------------------------------------------- */
 ZB_DECLARE_SIMPLE_DESC(1, 0);
 
@@ -255,30 +266,34 @@ ZB_DECLARE_SIMPLE_DESC(1, 0);
 		ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
 
 FLEXIT_TEMP_EP(supply,    FLEXIT_TEMP_EP_SUPPLY,     "\x06" "supply");
-FLEXIT_TEMP_EP(outdoor,   FLEXIT_TEMP_EP_OUTDOOR,    "\x07" "outdoor");
 
 /* ------------------------------------------------------------------------- */
-/* EP5/EP6 — Analog Input (Basic), one cluster each, percentage 0..100        */
+/* EP4/EP5/EP6 — Analog Input (Basic), one cluster each                       */
 /*                                                                            */
 /* A generic read-only numeric sensor: ZHA/Z2M expose PresentValue (float) as */
-/* a "%" sensor entity, named from Description and unit-tagged via            */
-/* EngineeringUnits (98 = percent). PresentValue + StatusFlags are reportable */
-/* (ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT == 2), so HA gets pushed updates on */
-/* the same publish tick as the temps. The canned attrib-list macro carries   */
-/* the full mandatory+optional set; values are seeded in app_clusters_attr_   */
-/* init() and refreshed by publish_tick().                                    */
+/* a sensor entity, named from Description and unit-tagged via EngineeringUnits*/
+/* (98 = percent, 62 = °C) / ApplicationType. PresentValue + StatusFlags are  */
+/* reportable (ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT == 2), so HA gets pushed  */
+/* updates on the same publish tick as the temps. The canned attrib-list macro*/
+/* carries the full mandatory+optional set; values are seeded in              */
+/* app_clusters_attr_init() and refreshed by publish_tick().                  */
+/*                                                                            */
+/* min/max bound the displayed range; resolution drives HA's display precision*/
+/* (1.0 -> 0 decimals for %, 0.1 -> 1 decimal for °C). units is the BACnet    */
+/* EngineeringUnits value; app_type is the BACnet application type (its group  */
+/* also picks the HA unit in current ZHA, so it must agree with units).       */
 /* ------------------------------------------------------------------------- */
-#define FLEXIT_AI_EP(name, ep_id, label)                                         \
+#define FLEXIT_AI_EP(name, ep_id, label, minval, maxval, res, units, app_type)   \
 	static zb_char_t   name##_desc[]   = label;                                  \
 	static zb_single_t name##_present  = 0.0f;                                   \
-	static zb_single_t name##_min       = 0.0f;                                  \
-	static zb_single_t name##_max       = 100.0f;                                \
-	static zb_single_t name##_resolution = 1.0f;                                 \
+	static zb_single_t name##_min       = (minval);                              \
+	static zb_single_t name##_max       = (maxval);                              \
+	static zb_single_t name##_resolution = (res);                                \
 	static zb_bool_t   name##_oos      = ZB_FALSE;                               \
 	static zb_uint8_t  name##_reliab   = 0;                                      \
 	static zb_uint8_t  name##_status   = ZB_ZCL_ANALOG_INPUT_STATUS_FLAG_NORMAL; \
-	static zb_uint16_t name##_units    = FLEXIT_AI_UNITS_PERCENT;                \
-	static zb_uint32_t name##_app_type = ZB_ZCL_AI_PERCENTAGE_OTHER;             \
+	static zb_uint16_t name##_units    = (units);                               \
+	static zb_uint32_t name##_app_type = (app_type);                            \
 	ZB_ZCL_DECLARE_ANALOG_INPUT_ATTRIB_LIST(name##_attrs,                        \
 		name##_desc, &name##_max, &name##_min, &name##_oos, &name##_present, \
 		&name##_reliab, &name##_resolution, &name##_status, &name##_units,  \
@@ -298,8 +313,14 @@ FLEXIT_TEMP_EP(outdoor,   FLEXIT_TEMP_EP_OUTDOOR,    "\x07" "outdoor");
 		(zb_af_simple_desc_1_1_t *)&simple_desc_##name,                     \
 		ZB_ZCL_ANALOG_INPUT_REPORT_ATTR_COUNT, reporting_##name, 0, NULL)
 
-FLEXIT_AI_EP(heat_exch, FLEXIT_AI_EP_HEAT_EXCH, "\x0e" "Heat exchanger"); /* 14 */
-FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x0f" "Heating element"); /* 15 */
+/* Intake air temperature (°C); the TEMPERATURE app-type group makes ZHA show °C. */
+FLEXIT_AI_EP(intake,    FLEXIT_AI_EP_INTAKE,    "\x16" "Intake air temperature", /* 22 */
+	FLEXIT_AI_TEMP_MIN_C, FLEXIT_AI_TEMP_MAX_C, 0.1f,
+	FLEXIT_AI_UNITS_DEGC, ZB_ZCL_AI_TEMPERATURE_OUTDOOR_AIR);
+FLEXIT_AI_EP(heat_exch, FLEXIT_AI_EP_HEAT_EXCH, "\x0e" "Heat exchanger",   /* 14 */
+	0.0f, 100.0f, 1.0f, FLEXIT_AI_UNITS_PERCENT, ZB_ZCL_AI_PERCENTAGE_OTHER);
+FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x0f" "Heating element",  /* 15 */
+	0.0f, 100.0f, 1.0f, FLEXIT_AI_UNITS_PERCENT, ZB_ZCL_AI_PERCENTAGE_OTHER);
 
 /* ------------------------------------------------------------------------- */
 /* EP7 — Analog Value (Basic): writable temperature setpoint                  */
@@ -354,7 +375,7 @@ ZB_AF_DECLARE_ENDPOINT_DESC(av_setpoint_ep, FLEXIT_AV_EP_SETPOINT, ZB_AF_HA_PROF
 ZB_AF_START_DECLARE_ENDPOINT_LIST(ep_list_flexit_ctx)
 	&ctrl_ep,
 	&supply_ep,
-	&outdoor_ep,
+	&intake_ep,
 	&heat_exch_ep,
 	&heating_ep,
 	&av_setpoint_ep,
@@ -584,6 +605,14 @@ void zigbee_ep_set_percent(enum zigbee_analog_channel ch, uint16_t percent)
 	k_mutex_unlock(&pending_lock);
 }
 
+void zigbee_ep_set_intake_temp(int16_t value_dc)
+{
+	k_mutex_lock(&pending_lock, K_FOREVER);
+	pending.analog_val[ZIGBEE_ANALOG_INTAKE_TEMP] = (float)value_dc / 10.0f;
+	pending.analog_dirty[ZIGBEE_ANALOG_INTAKE_TEMP] = true;
+	k_mutex_unlock(&pending_lock);
+}
+
 void zigbee_ep_set_mode(uint8_t flexit_mode)
 {
 	if (flexit_mode > 3) {
@@ -717,9 +746,9 @@ int zigbee_ep_init(void)
 
 	zigbee_enable();
 
-	LOG_INF("Zigbee data model started (EP1 fan + EP%d/%d temps + EP%d/%d analog + EP%d setpoint)",
-		FLEXIT_TEMP_EP_SUPPLY, FLEXIT_TEMP_EP_OUTDOOR,
-		FLEXIT_AI_EP_HEAT_EXCH, FLEXIT_AI_EP_HEATING,
+	LOG_INF("Zigbee data model started (EP1 fan + EP%d temp + EP%d/%d/%d analog + EP%d setpoint)",
+		FLEXIT_TEMP_EP_SUPPLY,
+		FLEXIT_AI_EP_INTAKE, FLEXIT_AI_EP_HEAT_EXCH, FLEXIT_AI_EP_HEATING,
 		FLEXIT_AV_EP_SETPOINT);
 
 	return 0;
