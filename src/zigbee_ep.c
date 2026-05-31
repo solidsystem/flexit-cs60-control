@@ -876,7 +876,11 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	zb_zdo_app_signal_hdr_t *sig_hdr = NULL;
 	zb_zdo_app_signal_type_t sig = zb_get_app_signal(bufid, &sig_hdr);
 
-	/* Default handling: join/rejoin, steering, etc. */
+	/* Default handling: join/rejoin, steering, etc. The unjoined-device join
+	 * window is bounded by CONFIG_ZIGBEE_DEV_REJOIN_TIMEOUT_MS (see prj.conf):
+	 * the default handler schedules a stop of the steering/rejoin procedure
+	 * after that timeout, so an unjoined device only stays joinable for that
+	 * long after boot/zbreset rather than indefinitely. */
 	ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
 
 	/* Once a requested factory reset has produced the network-leave, the
