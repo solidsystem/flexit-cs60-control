@@ -221,12 +221,4 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
   `number` (ZHA has no native Analog Value discovery). EP5/EP6 are left to ZHA's native Analog
   Input discovery (defining them in the quirk too would duplicate them). Drop into HA's
   `custom_quirks_path`; install notes are in the file's docstring.
-- `tools/zb-coordinator` — test Zigbee coordinator (ncs-zigbee `network_coordinator` + a static
-  PM file) for the nrf52840dk; used to verify the end-device join. Build with
-  `-DZEPHYR_EXTRA_MODULES=$HOME/ncs/v3.3.0/ncs-zigbee` (after `--`), flash with `west flash`.
-  Note: this replaces the `hci_usb` BLE adapter on the DK, so `ble-client` is offline while the
-  coordinator runs (restore with `west flash --build-dir build-hci-usb`).
-- `tools/zb-shell` — ZCL-capable bench coordinator (ncs-zigbee `shell` sample + static PM) for the
-  nrf52840dk. Resumes the persisted network from NVRAM (`bdb role zc` / `bdb start`); drive ZCL over
-  `/dev/ttyACM0` (`zcl attr read/write`, `zdo bind`, `zcl subscribe`). 
 - HA ZHA integration: https://www.home-assistant.io/integrations/zha/
