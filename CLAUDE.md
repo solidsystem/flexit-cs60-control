@@ -102,12 +102,21 @@ flash/CBOR/CRC deps) so the *next* update has an SMP server to talk to.
 
 ## BLE client (`tools/ble-client`)
 
-A Go CLI tool that connects to the xiao_ble over BLE using an nrf52840dk running
-`hci_usb` as the HCI adapter (appears as `hci0` in BlueZ). Handles BLE pairing
-automatically using the passkey from the `FLEXIT_CS60_CONTROL_BLE_KEY`
-environment variable (a 6-digit number) — the same variable the firmware bakes
-in at build time. Every connecting subcommand exits with an error if it is unset
-(`scan` does not pair, so it does not need it).
+A Go CLI tool that connects to the xiao_ble over BLE. It is cross-platform; the
+pairing layer differs per OS (see `pairing_linux.go` / `pairing_other.go`):
+
+- **Linux (BlueZ):** uses an nrf52840dk running `hci_usb` as the HCI adapter
+  (appears as `hci0` in BlueZ). Pairing is handled automatically using the
+  passkey from the `FLEXIT_CS60_CONTROL_BLE_KEY` environment variable (a 6-digit
+  number) — the same variable the firmware bakes in at build time. Every
+  connecting subcommand exits with an error if it is unset (`scan` does not
+  pair, so it does not need it).
+- **macOS (CoreBluetooth) / Windows (WinRT):** uses the machine's built-in
+  Bluetooth radio — no separate HCI dongle. The OS owns pairing: on first
+  encrypted access it shows a system pairing dialog where you type the 6-digit
+  passkey by hand, so `FLEXIT_CS60_CONTROL_BLE_KEY` is *not* used. Building
+  requires cgo + the platform SDK (e.g. Xcode on macOS), so it must be built on
+  that OS — it cannot be cross-compiled from Linux.
 
 ```bash
 cd tools/ble-client
