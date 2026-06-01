@@ -1,4 +1,6 @@
 build*/
 run/
-tools/lib/
+# Don't commit the built binary
+tools/ble-client/ble-client
 .DS_Store
+/.claude/scheduled_tasks.lock

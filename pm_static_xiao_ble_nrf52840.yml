@@ -1,0 +1,71 @@
+# Static Partition Manager layout for the dual-protocol (BLE + Zigbee) firmware.
+#
+# nRF52840: 1 MB internal flash + the XIAO BLE's onboard 2 MB QSPI flash
+# (p25q16h, referenced via the `nordic,pm-ext-flash` chosen node).
+#
+# The MCUboot DFU **secondary** slot is placed in external QSPI flash, so the
+# internal flash only carries the bootloader, the single (large) primary slot,
+# and the persistent areas. This removes the dual-slot squeeze that otherwise
+# forces the BLE + ZBOSS image past 1 MB.
+#
+# Internal flash (flash_primary, 0x00000..0x100000):
+#   0x00000  mcuboot                 (0x10000)  bootloader + QSPI driver
+#   0x10000  mcuboot_primary         (0xe5000)  = mcuboot_pad + app  (~916 KB app)
+#   0xf5000  settings_storage        (0x02000)  BLE bonding (NVS)
+#   0xf7000  zboss_product_config    (0x01000)
+#   0xf8000  zboss_nvram             (0x08000)  ZBOSS network state (32 KB)
+#
+# External QSPI flash (external_flash, 0x000000..0x200000):
+#   0x000000 mcuboot_secondary       (0xe5000)  DFU staging (== primary)
+#   0x0e5000 external_flash          (0x11b000) spare / future use
+
+mcuboot:
+  address: 0x0
+  size: 0x10000
+  region: flash_primary
+
+mcuboot_pad:
+  address: 0x10000
+  size: 0x200
+  region: flash_primary
+
+mcuboot_primary:
+  address: 0x10000
+  size: 0xe5000
+  region: flash_primary
+  orig_span: &mcuboot_primary_span
+    - mcuboot_pad
+    - app
+  span: *mcuboot_primary_span
+
+app:
+  address: 0x10200
+  size: 0xe4e00
+  region: flash_primary
+
+settings_storage:
+  address: 0xf5000
+  size: 0x2000
+  region: flash_primary
+
+zboss_product_config:
+  address: 0xf7000
+  size: 0x1000
+  region: flash_primary
+
+zboss_nvram:
+  address: 0xf8000
+  size: 0x8000
+  region: flash_primary
+
+mcuboot_secondary:
+  address: 0x0
+  size: 0xe5000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+
+external_flash:
+  address: 0xe5000
+  size: 0x11b000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
