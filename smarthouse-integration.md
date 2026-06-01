@@ -171,6 +171,45 @@ From `tools/ble-client` (pairs automatically, fixed passkey `444999`):
   frozen value; it recovers automatically when the bus resumes. The Analog Input / Analog Value
   endpoints (EP4 intake temp, EP5/EP6 percentages, EP7 setpoint) and FanMode have no ZCL invalid
   value, so a stale reading on those holds its last-known value.
+- **CS60-link connectivity sensor** (firmware → HA): EP7 carries a co-resident **Binary Input**
+  whose `PresentValue` tracks the RS485 link to the CS60 — `on` while a valid FC10 status frame has
+  arrived within the last 5 s (`FLEXIT_CS60_LINK_STALE_MS`), `off` otherwise (cable pulled, bus
+  miswired, CS60 powered down). ZHA discovers it natively as a `binary_sensor` named
+  **"CS60 RS485 connected"**.
+  This is the bus-level "is the data live?" signal the stale-data handling above can't express
+  per-entity: ZHA availability is device-level, and the Analog Input/Value/FanMode entities have no
+  invalid sentinel, so they hold their last value when the bus dies. Bind their availability to this
+  sensor with a template wrapper. Example for the fan (proxy the ZHA fan, but follow CS60 link for
+  availability — adjust the `entity_id`s to those ZHA created for your device):
+
+  ```yaml
+  # configuration.yaml
+  template:
+    - fan:
+        - name: Flexit ventilation
+          unique_id: flexit_ventilation
+          availability: >
+            {{ is_state('binary_sensor.flexit_cs60_control_cs60_rs485_connected', 'on') }}
+          state: >
+            {{ 'off' if is_state('fan.flexit_cs60_control_fan', 'off') else 'on' }}
+          preset_mode: "{{ state_attr('fan.flexit_cs60_control_fan', 'preset_mode') }}"
+          preset_modes: ["Low", "Medium", "High"]  # must match ZHA's FanMode sequence
+          set_preset_mode:
+            - service: fan.set_preset_mode
+              target: { entity_id: fan.flexit_cs60_control_fan }
+              data: { preset_mode: "{{ preset_mode }}" }
+          turn_on:
+            - service: fan.turn_on
+              target: { entity_id: fan.flexit_cs60_control_fan }
+          turn_off:
+            - service: fan.turn_off
+              target: { entity_id: fan.flexit_cs60_control_fan }
+  ```
+
+  When the CS60 link drops, `binary_sensor.flexit_cs60_control_cs60_rs485_connected` goes `off`, the template
+  fan reports *unavailable*, and the dashboard greys it out instead of showing a stale mode the bus
+  can no longer confirm or change. The same `availability:` line works on a `template` sensor/number
+  wrapper for the EP4/EP5/EP6/EP7 entities.
 
 ---
 

@@ -48,6 +48,7 @@
 #include <zigbee/zigbee_app_utils.h>
 #include <zb_nrf_platform.h>
 
+#include "panel_mirror.h"
 #include "zigbee_ep.h"
 
 LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
@@ -108,6 +109,15 @@ LOG_MODULE_REGISTER(zigbee_ep, LOG_LEVEL_INF);
  */
 #define FLEXIT_TEMP_STALE_MS      60000
 
+/* CS60 RS485 link liveness window for the EP7 connectivity Binary Input. The
+ * CS60 broadcasts its FC10 status frame several times a second, so treat the
+ * link as up while a valid frame has arrived within this window and down
+ * otherwise (cable pulled, miswired bus, CS60 absent). Same threshold the main
+ * loop uses for the red link-down LED. HA binds entity availability to this
+ * sensor — see smarthouse-integration.md.
+ */
+#define FLEXIT_CS60_LINK_STALE_MS 5000
+
 /* FanMode enum is identical to the Flexit mode numbering for 0..3:
  *   Off(0)=Stop  Low(1)=Min  Medium(2)=Normal  High(3)=Max
  * (ON/AUTO/SMART, 4..6, are not meaningful for the CS60.)
@@ -153,6 +163,11 @@ static K_MUTEX_DEFINE(pending_lock);
  * clears it, and a source dropout sets it again (publishing the sentinel once).
  */
 static bool temp_stale[ZIGBEE_TEMP_COUNT];
+
+/* Last CS60-link state published to the EP7 connectivity Binary Input, owned by
+ * publish_tick (ZBOSS thread only). -1 = nothing published yet, so the first
+ * tick always writes the current state. */
+static int cs60_link_state = -1;
 
 static const uint8_t temp_ep_id[ZIGBEE_TEMP_COUNT] = {
 	[ZIGBEE_TEMP_SUPPLY]  = FLEXIT_TEMP_EP_SUPPLY,
@@ -497,19 +512,31 @@ ZB_ZCL_START_DECLARE_ATTRIB_LIST_CLUSTER_REVISION(av_setpoint_attrs, ZB_ZCL_ANAL
 	ZB_ZCL_SET_ATTR_DESC(ZB_ZCL_ATTR_ANALOG_VALUE_APPLICATION_TYPE_ID, &av_setpoint_app_type)
 ZB_ZCL_FINISH_DECLARE_ATTRIB_LIST;
 
+/* CS60 RS485-link connectivity Binary Input, co-resident on the setpoint
+ * endpoint (the only endpoint that didn't already carry an alarm Binary Input).
+ * present_value true = link up. Unlike the alarm Binary Inputs it isn't fed by
+ * a setter; publish_tick() samples panel_mirror_cs60_link_up() and writes it.
+ * HA binds the fan/setpoint entity availability to this binary_sensor — see
+ * smarthouse-integration.md. */
+FLEXIT_BI_DECL(av_setpoint, "\x14" "CS60 RS485 connected");  /* 20 */
+
 static zb_zcl_cluster_desc_t av_setpoint_clusters[] = {
 	ZB_ZCL_CLUSTER_DESC(ZB_ZCL_CLUSTER_ID_ANALOG_VALUE,
 		ZB_ZCL_ARRAY_SIZE(av_setpoint_attrs, zb_zcl_attr_t), av_setpoint_attrs,
 		ZB_ZCL_CLUSTER_SERVER_ROLE, ZB_ZCL_MANUF_CODE_INVALID),
+	FLEXIT_BI_CLUSTER_DESC(av_setpoint),
 };
-ZB_DECLARE_SIMPLE_DESC(1, 0);
-static zb_af_simple_desc_1_0_t simple_desc_av_setpoint = {
+/* zb_af_simple_desc_2_0_t is already declared above (sensor endpoints). */
+static zb_af_simple_desc_2_0_t simple_desc_av_setpoint = {
 	FLEXIT_AV_EP_SETPOINT, ZB_AF_HA_PROFILE_ID, ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
-	FLEXIT_DEVICE_VERSION, 0, 1, 0, { ZB_ZCL_CLUSTER_ID_ANALOG_VALUE } };
-ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_av_setpoint, 1 /* PresentValue */);
+	FLEXIT_DEVICE_VERSION, 0, 2, 0,
+	{ ZB_ZCL_CLUSTER_ID_ANALOG_VALUE, ZB_ZCL_CLUSTER_ID_BINARY_INPUT } };
+ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_av_setpoint,
+	1 /* PresentValue */ + FLEXIT_BI_REPORT_ATTR_COUNT);
 ZB_AF_DECLARE_ENDPOINT_DESC(av_setpoint_ep, FLEXIT_AV_EP_SETPOINT, ZB_AF_HA_PROFILE_ID, 0, NULL,
 	ZB_ZCL_ARRAY_SIZE(av_setpoint_clusters, zb_zcl_cluster_desc_t), av_setpoint_clusters,
-	(zb_af_simple_desc_1_1_t *)&simple_desc_av_setpoint, 1, reporting_av_setpoint, 0, NULL);
+	(zb_af_simple_desc_1_1_t *)&simple_desc_av_setpoint,
+	1 + FLEXIT_BI_REPORT_ATTR_COUNT, reporting_av_setpoint, 0, NULL);
 
 /* No N-EP convenience macro past 4, so declare the 6-endpoint list by hand
  * (same expansion as ZBOSS_DECLARE_DEVICE_CTX_n_EP). 6 app endpoints is within
@@ -718,6 +745,21 @@ static void publish_tick(zb_uint8_t param)
 				ZB_ZCL_ATTR_BINARY_INPUT_PRESENT_VALUE_ID,
 				(zb_uint8_t *)&pv, ZB_FALSE);
 		}
+	}
+
+	/* CS60 RS485-link connectivity Binary Input (EP7). Sampled here rather
+	 * than fed through a setter: the panel mirror tracks FC10 liveness, and we
+	 * publish only on a change so HA gets a push when the link comes/goes. */
+	bool link_up = panel_mirror_cs60_link_up(FLEXIT_CS60_LINK_STALE_MS);
+	if ((int)link_up != cs60_link_state) {
+		zb_bool_t pv = link_up ? ZB_TRUE : ZB_FALSE;
+		zb_zcl_set_attr_val(FLEXIT_AV_EP_SETPOINT,
+			ZB_ZCL_CLUSTER_ID_BINARY_INPUT,
+			ZB_ZCL_CLUSTER_SERVER_ROLE,
+			ZB_ZCL_ATTR_BINARY_INPUT_PRESENT_VALUE_ID,
+			(zb_uint8_t *)&pv, ZB_FALSE);
+		cs60_link_state = (int)link_up;
+		LOG_INF("CS60 RS485 link %s", link_up ? "up" : "down");
 	}
 
 	if (setpoint_dirty) {
