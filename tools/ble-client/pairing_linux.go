@@ -83,3 +83,56 @@ func setupPairing() {
 	must("system dbus", err)
 	registerPairingAgent(sysbus)
 }
+
+// removeBond deletes the BlueZ bond/keys for the xiao_ble, if BlueZ knows about
+// it. It enumerates BlueZ's managed objects, finds any org.bluez.Device1 whose
+// Name/Alias matches deviceName, and calls Adapter1.RemoveDevice on its owning
+// adapter — which drops the device along with its stored pairing keys. The
+// device's own half of the bond is unaffected (clear that on the firmware side
+// for a full both-ends reset).
+func removeBond() {
+	sysbus, err := dbus.SystemBus()
+	must("system dbus", err)
+
+	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+	err = sysbus.Object("org.bluez", "/").
+		Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&objects)
+	must("get managed objects", err)
+
+	removed := 0
+	for path, ifaces := range objects {
+		props, ok := ifaces["org.bluez.Device1"]
+		if !ok {
+			continue
+		}
+
+		name, _ := props["Name"].Value().(string)
+		alias, _ := props["Alias"].Value().(string)
+		if name != deviceName && alias != deviceName {
+			continue
+		}
+
+		adapterPath, ok := props["Adapter"].Value().(dbus.ObjectPath)
+		if !ok {
+			log.Printf("device %s has no Adapter property; skipping", path)
+			continue
+		}
+		paired, _ := props["Paired"].Value().(bool)
+
+		if callErr := sysbus.Object("org.bluez", adapterPath).
+			Call("org.bluez.Adapter1.RemoveDevice", 0, path).Err; callErr != nil {
+			log.Fatalf("remove device %s: %v", path, callErr)
+		}
+
+		if paired {
+			fmt.Printf("Removed bond for %s (%s)\n", deviceName, path)
+		} else {
+			fmt.Printf("Removed %s (%s) — was known but not bonded\n", deviceName, path)
+		}
+		removed++
+	}
+
+	if removed == 0 {
+		fmt.Printf("No %s device known to BlueZ — nothing to remove.\n", deviceName)
+	}
+}

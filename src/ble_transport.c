@@ -166,14 +166,21 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
     char addr[BT_ADDR_LE_STR_LEN];
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
-    if (err) {
-        printk("BLE security failed (%s): level %u, err 0x%02x\n",
+    /* Reject not just hard failures (err) but also a link that came up below
+     * the L3 we requested in connected(). Without the level check, a pairing
+     * that downgrades to unauthenticated "Just Works" (level 2) completes with
+     * err==0 and is accepted — defeating the passkey, since the passkey is
+     * never exchanged in Just Works. Dropping anything < L3 forces a real
+     * authenticated (MITM passkey) pairing.
+     */
+    if (err || level < BT_SECURITY_L3) {
+        printk("BLE security insufficient (%s): level %u, err 0x%02x — disconnecting\n",
                addr, level, err);
         bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
         return;
     }
 
-    printk("BLE security raised (%s): level %u\n", addr, level);
+    printk("BLE security raised (%s): level %u (authenticated)\n", addr, level);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -388,8 +395,33 @@ static size_t format_state_line(char *buf, size_t cap)
  *               reboot so the device steers for a new coordinator on next
  *               boot. Echoes an ack on NUS TX, then the BLE link drops as the
  *               device reboots (~1-5 s later).
+ *   "clearbond" — remove the stored BLE pairing bond (device side). Echoes an
+ *               ack on NUS TX, then disconnects; the next connection must pair
+ *               afresh. The host's `ble-client unpair` sends this and then also
+ *               clears the host-side bond, in that order (device-then-host is
+ *               the only sequence that avoids a one-sided-bond deadlock).
  * ---------------------------------------------------------------------------
  */
+
+/* clearbond is deferred so the NUS ack notification flushes before we wipe the
+ * bond and drop the link. bt_unpair(BT_ID_DEFAULT, NULL) removes every stored
+ * bond (there is only ever the one central), erasing the keys from NVS since
+ * CONFIG_BT_SETTINGS=y; the explicit disconnect forces the central to re-pair
+ * on its next connect rather than reusing the now-stale session.
+ */
+static void clearbond_work_fn(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    int err = bt_unpair(BT_ID_DEFAULT, NULL);
+    printk("clearbond: bt_unpair returned %d\n", err);
+
+    if (current_conn) {
+        bt_conn_disconnect(current_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+    }
+}
+static K_WORK_DELAYABLE_DEFINE(clearbond_work, clearbond_work_fn);
+
 static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len)
 {
     printk("NUS RX: %.*s\n", len, (const char *)data);
@@ -419,6 +451,16 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
         (void)bt_nus_send(conn, (const uint8_t *)reply, sizeof(reply) - 1);
         printk("zbreset: triggering Zigbee factory reset\n");
         zigbee_ep_factory_reset();
+
+    } else if (len >= 9 && memcmp(data, "clearbond", 9) == 0) {
+        /* Ack before clearing: clearbond_work_fn() wipes the bond and drops
+         * this link, so the notification must flush first.
+         */
+        static const char reply[] =
+            "clearbond: removing bond, disconnecting (re-pair on next connect)\n";
+        (void)bt_nus_send(conn, (const uint8_t *)reply, sizeof(reply) - 1);
+        printk("clearbond: scheduling bond removal\n");
+        k_work_reschedule(&clearbond_work, K_MSEC(300));
 
     } else if (len >= 4 && memcmp(data, "mode", 4) == 0) {
         /* Parse the rest of the payload as a decimal integer 0..3. */

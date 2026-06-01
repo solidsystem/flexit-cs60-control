@@ -430,6 +430,77 @@ func cmdZbReset() {
 	}
 }
 
+// cmdUnpair removes the BLE pairing bond from BOTH ends, in the only order that
+// works: device side first, then host side.
+//
+//  1. While still bonded, it connects and sends "clearbond" over NUS RX. The
+//     firmware drops its stored bond and disconnects ~300 ms later.
+//  2. It then removes the host-side bond (BlueZ RemoveDevice on Linux; a manual
+//     hint on macOS/Windows — see removeBond).
+//
+// Doing it in this order avoids the one-sided-bond deadlock: if the host bond is
+// removed first, the device still forces an encrypted link on the next connect
+// and tears it down before NUS is reachable, so "clearbond" can never be sent.
+//
+// hostOnly skips the device step and only clears the host-side bond. This is the
+// recovery escape hatch for an already-deadlocked bond, where connecting (to
+// send "clearbond") is impossible — pair afresh from bluetoothctl afterwards.
+func cmdUnpair(hostOnly bool) {
+	if hostOnly {
+		fmt.Println("Removing host-side bond only...")
+		removeBond()
+		fmt.Println("Host-side bond cleared.")
+		return
+	}
+
+	setupPairing()
+
+	device := connectBLE()
+
+	txChar, rxChar := openNUS(device)
+
+	notifyCh := make(chan []byte, 16)
+	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
+		b := make([]byte, len(buf))
+		copy(b, buf)
+		notifyCh <- b
+	}))
+
+	fmt.Println("Sending \"clearbond\" to device...")
+	_, werr := rxChar.WriteWithoutResponse([]byte("clearbond"))
+	must("write clearbond", werr)
+
+	var line []byte
+	deadline := time.After(3 * time.Second)
+waitAck:
+	for {
+		select {
+		case chunk := <-notifyCh:
+			line = append(line, chunk...)
+			if i := indexByte(line, '\n'); i >= 0 {
+				fmt.Print(string(line[:i+1]))
+				break waitAck
+			}
+		case <-deadline:
+			if len(line) > 0 {
+				fmt.Println(strings.TrimRight(string(line), "\r\n"))
+			} else {
+				log.Fatal("Timeout waiting for clearbond ack")
+			}
+			break waitAck
+		}
+	}
+
+	// Device side is cleared; drop the link (the firmware also drops it), then
+	// clear the host side.
+	device.Disconnect()
+
+	fmt.Println("Removing host-side bond...")
+	removeBond()
+
+	fmt.Println("Pairing fully cleared; the device will re-pair on the next connection.")
+}
+
 // formatStateHuman parses the compact one-line firmware state string and
 // prints a verbose, multiline human-readable report to stdout.
 //
@@ -644,11 +715,13 @@ func usage() {
   %s mode <0|1|2|3>        — Queue a CMD_MODE change (Stop/Min/Normal/Max)
   %s setpoint <°C>         — Queue a temperature setpoint change (e.g. 20.5; clamped 10-30 °C)
   %s zbreset               — Zigbee factory reset: leave network, clear NVRAM, reboot to re-pair
+  %s unpair [--host-only]  — Remove the BLE pairing bond from both device and host (re-pair on next connect);
+                             --host-only clears just the host side (recovery for an already-deadlocked bond)
   %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
   %s scan                  — Scan and print RSSI for flexit-cs60-control (Ctrl-C to stop)
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -693,6 +766,14 @@ func main() {
 		cmdSetpoint(os.Args[2])
 	case "zbreset":
 		cmdZbReset()
+	case "unpair":
+		hostOnly := false
+		for _, arg := range os.Args[2:] {
+			if arg == "--host-only" {
+				hostOnly = true
+			}
+		}
+		cmdUnpair(hostOnly)
 	case "list":
 		cmdList()
 	case "scan":
