@@ -10,6 +10,10 @@ Inspired by https://github.com/MSkjel/esphome-flexit-modbus-server.
 
 ### Zigbee 
 
+Inputs displayed and controllable via Zigbee device:
+- Fan speed (mode): Off, min, normal, max. (the presets normally adjusted via CI60 panel, with the addition of off.)
+- Supply air setpoint. Allows adjusting the target of Supply air temperature, which the heat exchanged tries to reach.
+
 Sensor values exposed via zigbee:
 - Supply air temperature is exposed as the main temperature sensor.
 - Intake air temperature is exposed as a AnalogInput sensor.
@@ -24,17 +28,14 @@ Sensor values exposed via zigbee:
 
     Actual triggering of these alarms has not been tested at the time of writing this.
 
-Inputs controllable via Zigbee device:
-- Fan speed (mode): Off, min, normal, max. (the presets normally adjusted via CI60 panel, with the addition of off.)
-- Supply air setpoint. Allows adjusting the target of Supply air temperature, which the heat exchanged tries to reach.
 
-Zigbee functionality has been tested in Home Assitant, on ZHA.
+Zigbee functionality has been tested in Home Assitant, on ZHA. For the Supply air setpoint, a quirk must be added. See _tools/zha-quirk/flexit-cs60-control.py_
 
 ### Bluetooth
 
 Bluetooth is used for development/debugging/managment.
 
-The project is set up so that new firmware can be uploaded and activated through the `ble-client` cli provided in tools/ble-client directory.
+The project is set up so that new firmware can be uploaded and activated through the `ble-client` cli provided in _tools/ble-client directory_.
 
 The `ble-client` is also used to stream raw RS485 data to connected PC client, to reverse engineer and troubleshoot the connection to CS60. It can also erase stored zigbee pairing.
 
@@ -54,14 +55,14 @@ The source hardcode to modbus address 1, to be able to set Supply air temperatur
 
 ## Setup
 
-The XIAO BLE comes with Adafruit Bootloader. This project is built to use
+The XIAO BLE comes with Adafruit Bootloader. This project is made to use
 nordic SDK MCUboot. Flash it via SWD connection (using nRF52840 development kit, or other Jlink) the first time, then you can use USB or Bluetooth to update firmware after, if needed.
 
 1. Install and set up Nordic SDK (version 3.3.0).
 2. Connect XIAO BLE SWD pins to JLink (on nRF52840DK). Example here: https://www.ericbariaux.com/posts/xiao_nrf52840_swd/ 
 3. Flash MCUBoot bootloader to XIAO BLE.
 
-After this, disconnect XIAO BLE from nRF52840DK, and connect it via USB to flash using nordic SDK tools.
+After this, disconnect XIAO BLE from nRF52840DK SWD pins, and connect it via USB to flash using nordic SDK tools.
 
 **Bluetooth passkey:** env variable `FLEXIT_CS60_CONTROL_BLE_KEY` must be set to a 6 digit number when building, and when using bluetooth client. It is a secret key for connecting via bluetooth.
 
