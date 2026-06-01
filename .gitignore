@@ -3,6 +3,4 @@ run/
 # Don't commit the built binary
 tools/ble-client/ble-client
 .DS_Store
-# Don't commit captured trafficdata
-/trafficdata/
 /.claude/scheduled_tasks.lock
