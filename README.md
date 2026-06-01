@@ -104,3 +104,10 @@ MIT
 ## Disclaimer
 
 The source was mainly written by Claude Code and has not been reviewed in detail. The main functionality has been tested to work as intended connected to CS60 and Home Assistant zigbee (ZHA).
+
+## Security
+
+This is a hobby project not intended to be professionally secure. With physical access anyone can connect to the control device. Bluetooth connections are secured by `FLEXIT_CS60_CONTROL_BLE_KEY` value used when compiling. Use some random value for it, and have it set to same value on first connection with ble-client.
+
+Zigbee eagerly joins any network the first 60 seconds after start if not already paired (or after zbreset). 
+
