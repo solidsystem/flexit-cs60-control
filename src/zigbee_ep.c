@@ -48,6 +48,12 @@
 #include <zigbee/zigbee_app_utils.h>
 #include <zb_nrf_platform.h>
 
+#if defined(CONFIG_ZIGBEE_DEBUG_FUNCTIONS) && defined(CONFIG_MCUMGR_GRP_IMG_STATUS_HOOKS)
+#include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
+#include <zephyr/mgmt/mcumgr/grp/img_mgmt/img_mgmt_callbacks.h>
+#define FLEXIT_DFU_RADIO_YIELD 1
+#endif
+
 #include "panel_mirror.h"
 #include "zigbee_ep.h"
 
@@ -1018,12 +1024,64 @@ void zboss_signal_handler(zb_bufid_t bufid)
 }
 
 /* ------------------------------------------------------------------------- */
+/* DFU radio yield                                                            */
+/*                                                                            */
+/* As a Zigbee router the 802.15.4 side keeps the shared 2.4 GHz radio busy   */
+/* (continuous RX, relaying mesh broadcasts, channel scans), which starves    */
+/* the co-resident BLE link via MPSL and makes a sustained BLE DFU upload time */
+/* out. Suspend the ZBOSS thread for the duration of an image upload so the    */
+/* radio is handed to BLE/SMP, then resume. The device resets after a          */
+/* successful DFU (image-test + reset), so suspension across the upload is      */
+/* harmless; an aborted/failed upload fires DFU_STOPPED and we resume so Zigbee */
+/* keeps running. DFU_STARTED fires on the first chunk (off == 0), so all       */
+/* subsequent chunks ride a quiet radio. Gated on the debug-functions +        */
+/* notification-hook Kconfigs (see prj.conf).                                  */
+/* ------------------------------------------------------------------------- */
+#ifdef FLEXIT_DFU_RADIO_YIELD
+static enum mgmt_cb_return dfu_radio_yield_cb(uint32_t event,
+		enum mgmt_cb_return prev_status, int32_t *rc, uint16_t *group,
+		bool *abort_more, void *data, size_t data_size)
+{
+	ARG_UNUSED(prev_status);
+	ARG_UNUSED(rc);
+	ARG_UNUSED(group);
+	ARG_UNUSED(abort_more);
+	ARG_UNUSED(data);
+	ARG_UNUSED(data_size);
+
+	if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STARTED) {
+		if (zigbee_debug_zboss_thread_is_created()) {
+			LOG_WRN("DFU upload started — suspending ZBOSS to free the radio for BLE");
+			zigbee_debug_suspend_zboss_thread();
+		}
+	} else if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED) {
+		if (zigbee_debug_zboss_thread_is_created()) {
+			LOG_WRN("DFU upload stopped — resuming ZBOSS");
+			zigbee_debug_resume_zboss_thread();
+		}
+	}
+
+	return MGMT_CB_OK;
+}
+
+static struct mgmt_callback dfu_radio_yield_cb_entry = {
+	.callback = dfu_radio_yield_cb,
+	.event_id = MGMT_EVT_OP_IMG_MGMT_DFU_STARTED |
+		    MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED,
+};
+#endif /* FLEXIT_DFU_RADIO_YIELD */
+
+/* ------------------------------------------------------------------------- */
 /* Init                                                                      */
 /* ------------------------------------------------------------------------- */
 int zigbee_ep_init(void)
 {
 	ZB_AF_REGISTER_DEVICE_CTX(&flexit_ctx);
 	ZB_ZCL_REGISTER_DEVICE_CB(zcl_device_cb);
+
+#ifdef FLEXIT_DFU_RADIO_YIELD
+	mgmt_callback_register(&dfu_radio_yield_cb_entry);
+#endif
 
 	app_clusters_attr_init();
 

@@ -386,6 +386,7 @@ static size_t format_state_line(char *buf, size_t cap)
  *   "stream"  — start forwarding RS485 bytes in real time over NUS TX
  *   "stop"    — stop streaming
  *   "state"   — single-line snapshot of the decoded panel mirror
+ *   "zbstate" — single-line Zigbee join state (IDLE/JOINING/JOINED) on NUS TX
  *   "mode N"  — queue a CMD_MODE change (N = 0..3) on the Modbus slave;
  *               echoes "mode: queued=N" or "mode: bad arg" on NUS TX
  *   "setpoint C" — queue a setpoint change (C = °C, optional one decimal, e.g.
@@ -436,6 +437,21 @@ static void nus_received(struct bt_conn *conn, const uint8_t *data, uint16_t len
         int    err = bt_nus_send(conn, (const uint8_t *)line, (uint16_t)n);
         if (err) {
             printk("state: bt_nus_send failed: %d\n", err);
+        }
+
+    } else if (len >= 7 && memcmp(data, "zbstate", 7) == 0) {
+        /* Report the coarse Zigbee network/join state so it can be read over BLE
+         * when neither the USB console nor the status LED is visible. */
+        const char *s;
+        switch (zigbee_ep_net_state()) {
+        case ZIGBEE_NET_JOINING: s = "JOINING (pairing window open)"; break;
+        case ZIGBEE_NET_JOINED:  s = "JOINED";                        break;
+        default:                 s = "IDLE (not joined)";             break;
+        }
+        char reply[64];
+        int  n = snprintf(reply, sizeof(reply), "zbstate: %s\n", s);
+        if (n > 0) {
+            (void)bt_nus_send(conn, (const uint8_t *)reply, (uint16_t)n);
         }
 
     } else if (len >= 4 && memcmp(data, "stop", 4) == 0) {
