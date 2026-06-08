@@ -156,7 +156,7 @@ static struct {
 	bool    analog_dirty[ZIGBEE_ANALOG_COUNT];
 	bool    binary_val[ZIGBEE_BINARY_COUNT]; /* alarm flag, true = active */
 	bool    binary_dirty[ZIGBEE_BINARY_COUNT];
-	float   setpoint_val;     /* setpoint readback, °C */
+	float   setpoint_val;     /* setpoint readback, deci-degrees (°C ×10) */
 	bool    setpoint_dirty;
 	int64_t setpoint_hold_until; /* skip readback latch until this uptime (ms) */
 	uint8_t mode;       /* Flexit 0..3 */
@@ -488,9 +488,14 @@ FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x0f" "Heating element",  /* 15
 /* ------------------------------------------------------------------------- */
 /* EP7 — Analog Value (Basic): writable temperature setpoint                  */
 /*                                                                            */
-/* PresentValue is read/write (float °C) so a Zigbee client can both read the */
-/* CS60's current setpoint and push a new one; the write fires zcl_device_cb  */
-/* -> setpoint_write_cb -> flexit_slave_queue_setpoint (coil 12 / reg 0x000C).*/
+/* PresentValue is read/write so a Zigbee client can both read the CS60's      */
+/* current setpoint and push a new one; the write fires zcl_device_cb          */
+/* -> setpoint_write_cb -> flexit_slave_queue_setpoint (coil 12 / reg 0x000C). */
+/* It is a SINGLE (float) per the AnalogValue cluster spec, but carries        */
+/* deci-degrees (°C ×10): ZHA's config Number truncates writes to int(value /  */
+/* multiplier), so the quirk uses multiplier=0.1 and we transport the integer  */
+/* deci-degree count to preserve 0.1 °C resolution (a plain °C float would be  */
+/* truncated to whole degrees on write).                                       */
 /* PresentValue is marked reportable (overriding the canned RW-only descriptor)*/
 /* so panel-driven changes push to HA. EngineeringUnits = 62 (°C). ZHA does    */
 /* not auto-expose Analog Value, so tools/zha-quirk/flexit-cs60-control.py maps it to a   */
@@ -607,10 +612,14 @@ static void handle_fan_mode_write(zb_uint8_t fan_mode)
 /* ------------------------------------------------------------------------- */
 /* Setpoint write handling (Zigbee client -> Flexit)                         */
 /* ------------------------------------------------------------------------- */
-static void handle_setpoint_write(float celsius)
+static void handle_setpoint_write(float value_dc)
 {
-	/* Round °C to tenths and clamp to the unit's range. */
-	int32_t dc = (int32_t)(celsius * 10.0f + (celsius >= 0.0f ? 0.5f : -0.5f));
+	/* present_value carries the setpoint in tenths of a degree C (deci-degrees):
+	 * the ZHA quirk applies multiplier=0.1, so HA's 21.5 C arrives here as the
+	 * float 215.0. ZHA's config Number writes int(value / multiplier), so an
+	 * integer deci-degree count is what reaches us. Round to the nearest
+	 * deci-degree and clamp to the unit's range. */
+	int32_t dc = (int32_t)(value_dc + (value_dc >= 0.0f ? 0.5f : -0.5f));
 	if (dc < FLEXIT_SETPOINT_MIN_DC) {
 		dc = FLEXIT_SETPOINT_MIN_DC;
 	} else if (dc > FLEXIT_SETPOINT_MAX_DC) {
@@ -651,11 +660,12 @@ static void zcl_device_cb(zb_bufid_t bufid)
 				p->cb_param.set_attr_value_param.values.data8);
 		} else if (cluster_id == ZB_ZCL_CLUSTER_ID_ANALOG_VALUE &&
 			   attr_id == ZB_ZCL_ATTR_ANALOG_VALUE_PRESENT_VALUE_ID) {
-			/* SINGLE (float) arrives as the raw 32-bit IEEE-754 word. */
+			/* SINGLE (float) arrives as the raw 32-bit IEEE-754 word;
+			 * it carries deci-degrees (see handle_setpoint_write). */
 			zb_uint32_t raw = p->cb_param.set_attr_value_param.values.data32;
-			float celsius;
-			memcpy(&celsius, &raw, sizeof(celsius));
-			handle_setpoint_write(celsius);
+			float value_dc;
+			memcpy(&value_dc, &raw, sizeof(value_dc));
+			handle_setpoint_write(value_dc);
 		}
 	}
 }
@@ -856,7 +866,9 @@ void zigbee_ep_set_setpoint(int16_t value_dc)
 	 * the client just set with the CS60's not-yet-updated committed reading.
 	 */
 	if (k_uptime_get() >= pending.setpoint_hold_until) {
-		pending.setpoint_val = (float)value_dc / 10.0f;
+		/* present_value is published in deci-degrees; the ZHA quirk's
+		 * multiplier=0.1 scales it back to °C for display. */
+		pending.setpoint_val = (float)value_dc;
 		pending.setpoint_dirty = true;
 	}
 	k_mutex_unlock(&pending_lock);
