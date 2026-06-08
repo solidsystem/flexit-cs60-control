@@ -71,6 +71,31 @@ nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
     west build --build-dir build -t clean
 ```
 
+## Config / DFU pitfalls that can brick the device
+
+These two mistakes together bricked the device once (hung pre-USB with no
+auto-revert; recovery required SWD re-flash via the nRF52840DK — see "Recovering
+a bricked board" below). Avoid them:
+
+- **Do NOT enable `CONFIG_LOG_MODE_IMMEDIATE`.** The console is the USB CDC-ACM
+  port (`zephyr,console = board_cdc_acm_uart`). Immediate logging writes
+  synchronously to that port, and during early boot — before USB enumerates and
+  while no host is draining it — the first log call **blocks**, hanging the boot
+  so USB never comes up. Keep `CONFIG_LOG_MODE_DEFERRED=y`. To capture a crash
+  that deferred logging loses on reboot, prefer halting over rebooting (e.g.
+  `CONFIG_ZBOSS_HALT_ON_ASSERT=y`, or disable `CONFIG_RESET_ON_FATAL_ERROR` in a
+  debug build) so the message flushes and the port stays up — not immediate mode.
+
+- **Do NOT mark a debug/test image permanent (`image-confirm`) prematurely.**
+  Flash an unproven image as a **test boot only** (`image-test` + `reset`, no
+  `image-confirm`). A test image that crashes/reboots is automatically reverted
+  by MCUboot to the previous good image. The moment you confirm it (or
+  `image-confirm` its hash while it's the pending image), you make it permanent
+  and remove that safety net — a boot-looping or pre-USB-hanging confirmed image
+  can no longer be rolled back over USB. Only `image-confirm` an image you have
+  verified is healthy and reachable.
+
+
 ## Flashing
 
 **Normal workflow: BLE DFU** — see the `BLE client` section below.
