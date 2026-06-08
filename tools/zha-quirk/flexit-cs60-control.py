@@ -59,14 +59,26 @@ MODEL = "flexit-cs60-control"
 # Analog Value endpoint declared in src/zigbee_ep.c.
 EP_SETPOINT = 7
 
-# Report on a >=1 unit change, with a 10 s floor and a 5 min heartbeat.
+# present_value is transported in deci-degrees (°C ×10); see _MULTIPLIER below.
+# reportable_change is in those raw units, so 1 == a 0.1 °C change. Matched to the
+# 0.1 °C step so panel-driven changes propagate at the resolution the firmware
+# supports. 10 s floor, 5 min heartbeat.
 _REPORTING = ReportingConfig(min_interval=10, max_interval=300, reportable_change=1)
 
-# Setpoint bounds/step must match the firmware clamp (FLEXIT_SETPOINT_*_DC,
+# ZHA's config Number truncates writes to int(value / multiplier), so a plain °C
+# float would be written as a whole degree. We transport the setpoint as an
+# integer deci-degree count and let the multiplier scale it back to °C: HA's
+# 21.5 °C -> int(21.5 / 0.1) = 215 on the wire; readback 215 -> 215 * 0.1 = 21.5.
+# The firmware reinterprets present_value as deci-degrees to match
+# (src/zigbee_ep.c: handle_setpoint_write / zigbee_ep_set_setpoint).
+_MULTIPLIER = 0.1
+
+# Setpoint bounds/step are in *display* units (°C); the multiplier handles the
+# raw<->display conversion. Must match the firmware clamp (FLEXIT_SETPOINT_*_DC,
 # 10.0–30.0 °C) in src/zigbee_ep.c.
 _SETPOINT_MIN = 10.0
 _SETPOINT_MAX = 30.0
-_SETPOINT_STEP = 0.5
+_SETPOINT_STEP = 0.1
 
 (
     QuirkBuilder(MANUFACTURER, MODEL)
@@ -77,6 +89,7 @@ _SETPOINT_STEP = 0.5
         min_value=_SETPOINT_MIN,
         max_value=_SETPOINT_MAX,
         step=_SETPOINT_STEP,
+        multiplier=_MULTIPLIER,
         unit=UnitOfTemperature.CELSIUS,
         reporting_config=_REPORTING,
         translation_key="supply_air_temperature_setpoint",

@@ -234,6 +234,46 @@ func cmdConfirm(hashHex string) {
 // firmware's panel_mirror module, then disconnects.
 // If humanFriendly is true the compact firmware line is parsed and rendered
 // as a multiline human-readable report; otherwise it is printed as-is.
+// cmdReboot connects and issues an SMP OS-group reset, rebooting the device
+// without flashing anything. This is the quick way to recover the XIAO when it
+// has wedged after some time in operation: MCUboot re-runs the confirmed slot-0
+// image, so it comes back up working again — the same effect as the reset at
+// the end of a flash, minus the upload. The BLE link drops as the device
+// reboots (~1-5 s); that is expected and not an error.
+func cmdReboot() {
+	setupPairing()
+
+	device := connectBLE()
+	defer device.Disconnect()
+
+	smpSvcUUID, err := bluetooth.ParseUUID(smpServiceUUID)
+	must("parse SMP service UUID", err)
+	smpCharUUIDParsed, err := bluetooth.ParseUUID(smpCharUUID)
+	must("parse SMP char UUID", err)
+
+	srvcs, err := device.DiscoverServices([]bluetooth.UUID{smpSvcUUID})
+	must("discover SMP service", err)
+	if len(srvcs) == 0 {
+		log.Fatal("SMP service not found — is CONFIG_MCUMGR_TRANSPORT_BT enabled in firmware?")
+	}
+	chars, err := srvcs[0].DiscoverCharacteristics([]bluetooth.UUID{smpCharUUIDParsed})
+	must("discover SMP characteristic", err)
+	if len(chars) == 0 {
+		log.Fatal("SMP characteristic not found")
+	}
+
+	smp, err := newSMPTransport(chars[0])
+	must("init SMP transport", err)
+
+	fmt.Println("Sending reset...")
+	// The device may reboot before acking, so a response timeout here is not
+	// necessarily a failure — the reset still takes effect.
+	if err := smp.osReset(); err != nil {
+		fmt.Printf("(no reset ack: %v — device likely rebooted anyway)\n", err)
+	}
+	fmt.Println("Device rebooting. It will re-run the confirmed firmware in ~1-5 s.")
+}
+
 func cmdState(humanFriendly bool) {
 	setupPairing()
 
@@ -332,6 +372,50 @@ func cmdMode(modeArg string) {
 			return
 		}
 	}
+}
+
+// cmdZbState connects, sends "zbstate" over NUS RX, and prints the firmware's
+// one-line Zigbee join state (IDLE / JOINING / JOINED). Read-only — handy to
+// check pairing progress over BLE when no USB console or status LED is visible.
+func cmdZbState() {
+	setupPairing()
+
+	device := connectBLE()
+	defer device.Disconnect()
+
+	txChar, rxChar := openNUS(device)
+
+	notifyCh := make(chan []byte, 16)
+	must("subscribe TX", txChar.EnableNotifications(func(buf []byte) {
+		b := make([]byte, len(buf))
+		copy(b, buf)
+		notifyCh <- b
+	}))
+
+	// Resend a few times: right after EnableNotifications the firmware's CCC
+	// subscription may not have registered yet, so the first reply can be
+	// dropped (the same race that makes zbreset's ack occasionally time out).
+	fmt.Println("Sending \"zbstate\"...")
+	for attempt := 0; attempt < 3; attempt++ {
+		_, werr := rxChar.WriteWithoutResponse([]byte("zbstate"))
+		must("write zbstate", werr)
+
+		var line []byte
+		deadline := time.After(1500 * time.Millisecond)
+		for done := false; !done; {
+			select {
+			case chunk := <-notifyCh:
+				line = append(line, chunk...)
+				if i := indexByte(line, '\n'); i >= 0 {
+					fmt.Print(string(line[:i+1]))
+					return
+				}
+			case <-deadline:
+				done = true
+			}
+		}
+	}
+	log.Fatal("Timeout waiting for zbstate reply")
 }
 
 // cmdSetpoint connects, sends "setpoint <C>" over NUS RX (queueing a setpoint
@@ -714,14 +798,16 @@ func usage() {
   %s state [--human-friendly]  — Print decoded panel state; --human-friendly for verbose multiline output
   %s mode <0|1|2|3>        — Queue a CMD_MODE change (Stop/Min/Normal/Max)
   %s setpoint <°C>         — Queue a temperature setpoint change (e.g. 20.5; clamped 10-30 °C)
+  %s reboot                — Reboot the device via SMP reset (re-runs confirmed firmware; recovers a wedged XIAO)
   %s zbreset               — Zigbee factory reset: leave network, clear NVRAM, reboot to re-pair
+  %s zbstate               — Print the Zigbee join state (IDLE/JOINING/JOINED)
   %s unpair [--host-only]  — Remove the BLE pairing bond from both device and host (re-pair on next connect);
                              --host-only clears just the host side (recovery for an already-deadlocked bond)
   %s flash <image.bin>     — Upload signed firmware image via SMP over BLE
   %s confirm <hash-hex>    — Confirm image after test-boot (run after 'flash')
   %s list                  — List firmware images via SMP over BLE
   %s scan                  — Scan and print RSSI for flexit-cs60-control (Ctrl-C to stop)
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
 
@@ -764,8 +850,12 @@ func main() {
 			usage()
 		}
 		cmdSetpoint(os.Args[2])
+	case "reboot":
+		cmdReboot()
 	case "zbreset":
 		cmdZbReset()
+	case "zbstate":
+		cmdZbState()
 	case "unpair":
 		hostOnly := false
 		for _, arg := range os.Args[2:] {

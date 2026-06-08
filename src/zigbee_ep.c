@@ -48,6 +48,12 @@
 #include <zigbee/zigbee_app_utils.h>
 #include <zb_nrf_platform.h>
 
+#if defined(CONFIG_ZIGBEE_DEBUG_FUNCTIONS) && defined(CONFIG_MCUMGR_GRP_IMG_STATUS_HOOKS)
+#include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
+#include <zephyr/mgmt/mcumgr/grp/img_mgmt/img_mgmt_callbacks.h>
+#define FLEXIT_DFU_RADIO_YIELD 1
+#endif
+
 #include "panel_mirror.h"
 #include "zigbee_ep.h"
 
@@ -150,7 +156,7 @@ static struct {
 	bool    analog_dirty[ZIGBEE_ANALOG_COUNT];
 	bool    binary_val[ZIGBEE_BINARY_COUNT]; /* alarm flag, true = active */
 	bool    binary_dirty[ZIGBEE_BINARY_COUNT];
-	float   setpoint_val;     /* setpoint readback, °C */
+	float   setpoint_val;     /* setpoint readback, deci-degrees (°C ×10) */
 	bool    setpoint_dirty;
 	int64_t setpoint_hold_until; /* skip readback latch until this uptime (ms) */
 	uint8_t mode;       /* Flexit 0..3 */
@@ -482,9 +488,14 @@ FLEXIT_AI_EP(heating,   FLEXIT_AI_EP_HEATING,   "\x0f" "Heating element",  /* 15
 /* ------------------------------------------------------------------------- */
 /* EP7 — Analog Value (Basic): writable temperature setpoint                  */
 /*                                                                            */
-/* PresentValue is read/write (float °C) so a Zigbee client can both read the */
-/* CS60's current setpoint and push a new one; the write fires zcl_device_cb  */
-/* -> setpoint_write_cb -> flexit_slave_queue_setpoint (coil 12 / reg 0x000C).*/
+/* PresentValue is read/write so a Zigbee client can both read the CS60's      */
+/* current setpoint and push a new one; the write fires zcl_device_cb          */
+/* -> setpoint_write_cb -> flexit_slave_queue_setpoint (coil 12 / reg 0x000C). */
+/* It is a SINGLE (float) per the AnalogValue cluster spec, but carries        */
+/* deci-degrees (°C ×10): ZHA's config Number truncates writes to int(value /  */
+/* multiplier), so the quirk uses multiplier=0.1 and we transport the integer  */
+/* deci-degree count to preserve 0.1 °C resolution (a plain °C float would be  */
+/* truncated to whole degrees on write).                                       */
 /* PresentValue is marked reportable (overriding the canned RW-only descriptor)*/
 /* so panel-driven changes push to HA. EngineeringUnits = 62 (°C). ZHA does    */
 /* not auto-expose Analog Value, so tools/zha-quirk/flexit-cs60-control.py maps it to a   */
@@ -601,10 +612,14 @@ static void handle_fan_mode_write(zb_uint8_t fan_mode)
 /* ------------------------------------------------------------------------- */
 /* Setpoint write handling (Zigbee client -> Flexit)                         */
 /* ------------------------------------------------------------------------- */
-static void handle_setpoint_write(float celsius)
+static void handle_setpoint_write(float value_dc)
 {
-	/* Round °C to tenths and clamp to the unit's range. */
-	int32_t dc = (int32_t)(celsius * 10.0f + (celsius >= 0.0f ? 0.5f : -0.5f));
+	/* present_value carries the setpoint in tenths of a degree C (deci-degrees):
+	 * the ZHA quirk applies multiplier=0.1, so HA's 21.5 C arrives here as the
+	 * float 215.0. ZHA's config Number writes int(value / multiplier), so an
+	 * integer deci-degree count is what reaches us. Round to the nearest
+	 * deci-degree and clamp to the unit's range. */
+	int32_t dc = (int32_t)(value_dc + (value_dc >= 0.0f ? 0.5f : -0.5f));
 	if (dc < FLEXIT_SETPOINT_MIN_DC) {
 		dc = FLEXIT_SETPOINT_MIN_DC;
 	} else if (dc > FLEXIT_SETPOINT_MAX_DC) {
@@ -645,11 +660,12 @@ static void zcl_device_cb(zb_bufid_t bufid)
 				p->cb_param.set_attr_value_param.values.data8);
 		} else if (cluster_id == ZB_ZCL_CLUSTER_ID_ANALOG_VALUE &&
 			   attr_id == ZB_ZCL_ATTR_ANALOG_VALUE_PRESENT_VALUE_ID) {
-			/* SINGLE (float) arrives as the raw 32-bit IEEE-754 word. */
+			/* SINGLE (float) arrives as the raw 32-bit IEEE-754 word;
+			 * it carries deci-degrees (see handle_setpoint_write). */
 			zb_uint32_t raw = p->cb_param.set_attr_value_param.values.data32;
-			float celsius;
-			memcpy(&celsius, &raw, sizeof(celsius));
-			handle_setpoint_write(celsius);
+			float value_dc;
+			memcpy(&value_dc, &raw, sizeof(value_dc));
+			handle_setpoint_write(value_dc);
 		}
 	}
 }
@@ -850,7 +866,9 @@ void zigbee_ep_set_setpoint(int16_t value_dc)
 	 * the client just set with the CS60's not-yet-updated committed reading.
 	 */
 	if (k_uptime_get() >= pending.setpoint_hold_until) {
-		pending.setpoint_val = (float)value_dc / 10.0f;
+		/* present_value is published in deci-degrees; the ZHA quirk's
+		 * multiplier=0.1 scales it back to °C for display. */
+		pending.setpoint_val = (float)value_dc;
 		pending.setpoint_dirty = true;
 	}
 	k_mutex_unlock(&pending_lock);
@@ -1018,12 +1036,64 @@ void zboss_signal_handler(zb_bufid_t bufid)
 }
 
 /* ------------------------------------------------------------------------- */
+/* DFU radio yield                                                            */
+/*                                                                            */
+/* As a Zigbee router the 802.15.4 side keeps the shared 2.4 GHz radio busy   */
+/* (continuous RX, relaying mesh broadcasts, channel scans), which starves    */
+/* the co-resident BLE link via MPSL and makes a sustained BLE DFU upload time */
+/* out. Suspend the ZBOSS thread for the duration of an image upload so the    */
+/* radio is handed to BLE/SMP, then resume. The device resets after a          */
+/* successful DFU (image-test + reset), so suspension across the upload is      */
+/* harmless; an aborted/failed upload fires DFU_STOPPED and we resume so Zigbee */
+/* keeps running. DFU_STARTED fires on the first chunk (off == 0), so all       */
+/* subsequent chunks ride a quiet radio. Gated on the debug-functions +        */
+/* notification-hook Kconfigs (see prj.conf).                                  */
+/* ------------------------------------------------------------------------- */
+#ifdef FLEXIT_DFU_RADIO_YIELD
+static enum mgmt_cb_return dfu_radio_yield_cb(uint32_t event,
+		enum mgmt_cb_return prev_status, int32_t *rc, uint16_t *group,
+		bool *abort_more, void *data, size_t data_size)
+{
+	ARG_UNUSED(prev_status);
+	ARG_UNUSED(rc);
+	ARG_UNUSED(group);
+	ARG_UNUSED(abort_more);
+	ARG_UNUSED(data);
+	ARG_UNUSED(data_size);
+
+	if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STARTED) {
+		if (zigbee_debug_zboss_thread_is_created()) {
+			LOG_WRN("DFU upload started — suspending ZBOSS to free the radio for BLE");
+			zigbee_debug_suspend_zboss_thread();
+		}
+	} else if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED) {
+		if (zigbee_debug_zboss_thread_is_created()) {
+			LOG_WRN("DFU upload stopped — resuming ZBOSS");
+			zigbee_debug_resume_zboss_thread();
+		}
+	}
+
+	return MGMT_CB_OK;
+}
+
+static struct mgmt_callback dfu_radio_yield_cb_entry = {
+	.callback = dfu_radio_yield_cb,
+	.event_id = MGMT_EVT_OP_IMG_MGMT_DFU_STARTED |
+		    MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED,
+};
+#endif /* FLEXIT_DFU_RADIO_YIELD */
+
+/* ------------------------------------------------------------------------- */
 /* Init                                                                      */
 /* ------------------------------------------------------------------------- */
 int zigbee_ep_init(void)
 {
 	ZB_AF_REGISTER_DEVICE_CTX(&flexit_ctx);
 	ZB_ZCL_REGISTER_DEVICE_CB(zcl_device_cb);
+
+#ifdef FLEXIT_DFU_RADIO_YIELD
+	mgmt_callback_register(&dfu_radio_yield_cb_entry);
+#endif
 
 	app_clusters_attr_init();
 
