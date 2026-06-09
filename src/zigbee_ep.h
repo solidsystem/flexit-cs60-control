@@ -139,10 +139,14 @@ void zigbee_ep_set_setpoint_write_handler(zigbee_ep_setpoint_write_cb_t cb);
 void zigbee_ep_factory_reset(void);
 
 /* Current coarse network state, for driving the status LED. Safe to call from
- * any thread (backed by an atomic). The JOINING state spans only the bounded
- * join/pairing window of an unjoined device (clean NVRAM / after zbreset),
- * which closes after CONFIG_ZIGBEE_DEV_REJOIN_TIMEOUT_MS; a stored-network
- * reboot-rejoin reports IDLE until it actually joins, never JOINING.
+ * any thread (backed by an atomic). JOINED/IDLE track the stack's actual join
+ * status — reconciled every publish tick against zb_zdo_joined() — so the LED
+ * and `zbstate` self-heal after an automatic rejoin (e.g. a transient parent
+ * loss), not just on the boot/commissioning signal edges. The JOINING state
+ * spans only the bounded join/pairing window of an unjoined device (clean NVRAM
+ * / after zbreset), which closes after CONFIG_ZIGBEE_DEV_REJOIN_TIMEOUT_MS; a
+ * stored-network reboot-rejoin reports IDLE until it actually joins, never
+ * JOINING.
  */
 enum zigbee_net_state zigbee_ep_net_state(void);
 

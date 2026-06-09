@@ -670,6 +670,10 @@ static void zcl_device_cb(zb_bufid_t bufid)
 	}
 }
 
+/* Reconcile net_state with the stack's live join status. Defined alongside the
+ * network-status helpers below; called once per publish tick (ZBOSS thread). */
+static void net_state_refresh(void);
+
 /* ------------------------------------------------------------------------- */
 /* Publish latched values into the clusters (ZBOSS stack thread)             */
 /* ------------------------------------------------------------------------- */
@@ -794,6 +798,10 @@ static void publish_tick(zb_uint8_t param)
 			ZB_ZCL_ATTR_FAN_CONTROL_FAN_MODE_ID,
 			&fan_mode, ZB_FALSE);
 	}
+
+	/* Keep the status LED / `zbstate` in step with the stack's actual join
+	 * status, so an automatic rejoin self-heals it (see net_state_refresh). */
+	net_state_refresh();
 
 	ZB_SCHEDULE_APP_ALARM(publish_tick, 0, FLEXIT_PUBLISH_INTERVAL);
 }
@@ -929,7 +937,9 @@ void zigbee_ep_factory_reset(void)
 /* ------------------------------------------------------------------------- */
 /* Network status (for the main-loop status LED)                             */
 /*                                                                           */
-/* Updated from ZBOSS context in zboss_signal_handler() and read from the    */
+/* Seeded from the boot/commissioning signal edges in zboss_signal_handler() */
+/* for immediate feedback, then reconciled every publish tick by             */
+/* net_state_refresh() against the stack's live join status. Read from the   */
 /* main thread via zigbee_ep_net_state(); atomic so no lock is needed.       */
 /* ------------------------------------------------------------------------- */
 static atomic_t net_state = ATOMIC_INIT(ZIGBEE_NET_IDLE);
@@ -952,6 +962,33 @@ static void join_window_expire(zb_uint8_t param)
 enum zigbee_net_state zigbee_ep_net_state(void)
 {
 	return (enum zigbee_net_state)atomic_get(&net_state);
+}
+
+/* Reconcile net_state with the stack's actual join status.
+ *
+ * The signal-edge transitions in zboss_signal_handler() raise JOINED only on
+ * the boot/commissioning edges (DEVICE_REBOOT, STEERING). But ZBOSS performs an
+ * automatic secured rejoin after a transient parent loss
+ * (ZB_NWK_SIGNAL_NO_ACTIVE_LINKS_LEFT) without re-emitting either signal, so
+ * those edges alone leave net_state stuck at IDLE while the device is in fact
+ * back on the network — reports still flow and writes still land, yet the
+ * status LED slow-blinks and `zbstate` reports "not joined".
+ *
+ * Polling zb_zdo_joined() — from the ZBOSS thread (publish_tick), the only
+ * context where stack access is safe — lets JOINED/IDLE self-heal. The bounded
+ * pairing window (JOINING, fast blink) is edge-driven and deliberately left
+ * untouched: an unjoined device with the window open and one with it closed
+ * both read as "not joined" here, so that distinction can't be recovered from
+ * stack state. STEERING(RET_OK) ends JOINING on a successful join, and
+ * join_window_expire() ends it on timeout; from then on this poll governs.
+ */
+static void net_state_refresh(void)
+{
+	if (atomic_get(&net_state) == ZIGBEE_NET_JOINING) {
+		return;
+	}
+	atomic_set(&net_state,
+		   zb_zdo_joined() ? ZIGBEE_NET_JOINED : ZIGBEE_NET_IDLE);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -987,7 +1024,9 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		break;
 	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
 		/* Stored-network rejoin: joined iff RET_OK, otherwise idle while it
-		 * retries (a reboot-rejoin is not a pairing window, so never JOINING). */
+		 * retries (a reboot-rejoin is not a pairing window, so never JOINING).
+		 * Just an initial hint — net_state_refresh() reconciles within a tick
+		 * once the background rejoin completes. */
 		atomic_set(&net_state,
 			   (status == RET_OK) ? ZIGBEE_NET_JOINED : ZIGBEE_NET_IDLE);
 		break;
@@ -1001,7 +1040,9 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		break;
 	case ZB_ZDO_SIGNAL_LEAVE:
 	case ZB_NWK_SIGNAL_NO_ACTIVE_LINKS_LEFT:
-		/* Left the network or lost the parent — no longer connected. */
+		/* Left the network or lost the parent — no longer connected. Reflect
+		 * it immediately; if ZBOSS then auto-rejoins (parent loss), the
+		 * per-tick net_state_refresh() flips us back to JOINED on its own. */
 		atomic_set(&net_state, ZIGBEE_NET_IDLE);
 		break;
 	default:
