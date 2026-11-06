@@ -188,12 +188,28 @@ func (t *smpTransport) imageList() (string, error) {
 	return fmt.Sprintf("%v", m), nil
 }
 
-// imageSlot1Hash reads the image list and extracts the slot-1 hash bytes.
-func (t *smpTransport) imageSlot1Hash() ([]byte, error) {
+// imageSlot describes one entry of the SMP image-state list. Boolean flags
+// absent from the response mean false.
+type imageSlot struct {
+	Slot      uint64
+	Hash      []byte
+	Active    bool
+	Confirmed bool
+	Pending   bool
+	Permanent bool
+}
+
+// imageSlots reads the image list and parses each slot entry.
+func (t *smpTransport) imageSlots() ([]imageSlot, error) {
 	m, err := t.imageListRaw()
 	if err != nil {
 		return nil, err
 	}
+	return parseImageSlots(m)
+}
+
+// parseImageSlots extracts the slot entries from a decoded image-state response.
+func parseImageSlots(m map[string]interface{}) ([]imageSlot, error) {
 	images, ok := m["images"]
 	if !ok {
 		return nil, fmt.Errorf("no 'images' in response")
@@ -202,22 +218,45 @@ func (t *smpTransport) imageSlot1Hash() ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("unexpected 'images' type")
 	}
+	var out []imageSlot
 	for _, img := range list {
-		imgMap, ok := img.(map[interface{}]interface{})
-		if !ok {
-			// cbor/v2 may decode as map[string]interface{}
-			if imgMap2, ok2 := img.(map[string]interface{}); ok2 {
-				slot, _ := imgMap2["slot"].(uint64)
-				if slot == 1 {
-					return toByteSlice(imgMap2["hash"])
-				}
-				continue
-			}
+		// cbor/v2 may decode the entry with string or interface{} keys.
+		get := func(string) interface{} { return nil }
+		switch e := img.(type) {
+		case map[string]interface{}:
+			get = func(k string) interface{} { return e[k] }
+		case map[interface{}]interface{}:
+			get = func(k string) interface{} { return e[k] }
+		default:
 			continue
 		}
-		slot, _ := imgMap["slot"].(uint64)
-		if slot == 1 {
-			return toByteSlice(imgMap["hash"])
+		flag := func(k string) bool { b, _ := get(k).(bool); return b }
+		slot, _ := get("slot").(uint64)
+		hash, err := toByteSlice(get("hash"))
+		if err != nil {
+			return nil, fmt.Errorf("slot %d: %w", slot, err)
+		}
+		out = append(out, imageSlot{
+			Slot:      slot,
+			Hash:      hash,
+			Active:    flag("active"),
+			Confirmed: flag("confirmed"),
+			Pending:   flag("pending"),
+			Permanent: flag("permanent"),
+		})
+	}
+	return out, nil
+}
+
+// imageSlot1Hash reads the image list and extracts the slot-1 hash bytes.
+func (t *smpTransport) imageSlot1Hash() ([]byte, error) {
+	slots, err := t.imageSlots()
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range slots {
+		if s.Slot == 1 {
+			return s.Hash, nil
 		}
 	}
 	return nil, fmt.Errorf("slot 1 not found in image list")

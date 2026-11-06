@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -224,6 +225,42 @@ func cmdConfirm(hashHex string) {
 
 	smp, err := newSMPTransport(chars[0])
 	must("init SMP transport", err)
+
+	// Only confirm the image that is actually running from slot 0. MCUmgr's
+	// confirm-by-hash also accepts the slot-1 hash, which marks that image as
+	// the permanent pending image: if the test boot failed and MCUboot reverted,
+	// slot 1 still holds the bad image, and confirming it would make the next
+	// reset boot it with no rollback (see "Config / DFU pitfalls" in CLAUDE.md).
+	slots, err := smp.imageSlots()
+	must("imageSlots", err)
+	var running *imageSlot
+	for i := range slots {
+		if slots[i].Slot == 0 {
+			running = &slots[i]
+		}
+	}
+	if running == nil {
+		log.Fatal("refusing to confirm: slot 0 not found in image list")
+	}
+	if !bytes.Equal(running.Hash, hash) {
+		for _, s := range slots {
+			if s.Slot != 0 && bytes.Equal(s.Hash, hash) {
+				log.Fatalf("refusing to confirm: %x is in slot %d, not running.\n"+
+					"The device has not booted it (reset not done yet) or the test boot failed\n"+
+					"and MCUboot reverted. Running image (slot 0): %x\n"+
+					"Check with '%s list'.", hash, s.Slot, running.Hash, os.Args[0])
+			}
+		}
+		log.Fatalf("refusing to confirm: %x is not on the device.\n"+
+			"Running image (slot 0): %x", hash, running.Hash)
+	}
+	if !running.Active {
+		log.Fatalf("refusing to confirm: slot 0 (%x) is not reported active", running.Hash)
+	}
+	if running.Confirmed {
+		fmt.Println("Image is already confirmed. Nothing to do.")
+		return
+	}
 
 	fmt.Println("Confirming image...")
 	must("imageConfirm", smp.imageConfirm(hash))
