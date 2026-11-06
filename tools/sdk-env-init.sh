@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-export SDK_VERSION="v3.3.0"
+export SDK_VERSION="v3.4.0"
 
 source ~/ncs/${SDK_VERSION}/zephyr/zephyr-env.sh
 

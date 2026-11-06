@@ -27,8 +27,8 @@ which is connected to **flexit cs60**.
 
 ## Toolchain
 
-- NCS version: v3.3.0
-- SDK: `~/ncs/v3.3.0`
+- NCS version: v3.4.0
+- SDK: `~/ncs/v3.4.0`
 - Board: `xiao_ble/nrf52840`
 
 When creating helper scripts/software, do it in golang if possible.
@@ -38,8 +38,8 @@ When creating helper scripts/software, do it in golang if possible.
 Commands must be run with the NCS toolchain. The pattern is:
 
 ```bash
-source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
-nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- <command>
+source ~/ncs/v3.4.0/zephyr/zephyr-env.sh
+nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 -- <command>
 ```
 
 The firmware build requires the BLE pairing passkey in the environment — it is
@@ -55,19 +55,19 @@ export FLEXIT_CS60_CONTROL_BLE_KEY=444999
 
 ```bash
 # Build
-nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 -- \
     west build -b xiao_ble/nrf52840 --sysbuild --build-dir build
 
 # Pristine build (clean slate)
-nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 -- \
     west build -b xiao_ble/nrf52840 --sysbuild --pristine --build-dir build
 
 # Kconfig menu
-nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 -- \
     west build --build-dir build -t menuconfig
 
 # Clean
-nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 -- \
     west build --build-dir build -t clean
 ```
 
@@ -200,8 +200,8 @@ disables forwarding.
 
 ```bash
 # 1. Build
-source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
-nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 -- \
+source ~/ncs/v3.4.0/zephyr/zephyr-env.sh
+nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 -- \
     west build -b xiao_ble/nrf52840 --sysbuild --build-dir build
 
 # 2. Flash over BLE (prints the hash and the confirm command to run next)

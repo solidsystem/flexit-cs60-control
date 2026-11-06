@@ -23,7 +23,7 @@ endif()
 # pull in the ZBOSS stack. Override on the command line with
 # -DZEPHYR_EXTRA_MODULES=<path> if the add-on lives elsewhere.
 if(NOT DEFINED ZEPHYR_EXTRA_MODULES)
-    set(ZEPHYR_EXTRA_MODULES "$ENV{HOME}/ncs/v3.3.0/ncs-zigbee")
+    set(ZEPHYR_EXTRA_MODULES "$ENV{HOME}/ncs/v3.4.0/ncs-zigbee")
 endif()
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
