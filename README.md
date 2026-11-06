@@ -58,7 +58,7 @@ The source hardcode to modbus address 1, to be able to set Supply air temperatur
 The XIAO BLE comes with Adafruit Bootloader. This project is made to use
 nordic SDK MCUboot. Flash it via SWD connection (using nRF52840 development kit, or other Jlink) the first time, then you can use USB or Bluetooth to update firmware after, if needed.
 
-1. Install and set up Nordic SDK (version 3.3.0).
+1. Install and set up Nordic SDK (version 3.4.0).
 2. Connect XIAO BLE SWD pins to JLink (on nRF52840DK). Example here: https://www.ericbariaux.com/posts/xiao_nrf52840_swd/ 
 3. Flash MCUBoot bootloader to XIAO BLE.
 

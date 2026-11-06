@@ -1044,12 +1044,41 @@ void zboss_signal_handler(zb_bufid_t bufid)
 /* out. Suspend the ZBOSS thread for the duration of an image upload so the    */
 /* radio is handed to BLE/SMP, then resume. The device resets after a          */
 /* successful DFU (image-test + reset), so suspension across the upload is      */
-/* harmless; an aborted/failed upload fires DFU_STOPPED and we resume so Zigbee */
-/* keeps running. DFU_STARTED fires on the first chunk (off == 0), so all       */
+/* harmless; a failed upload fires DFU_STOPPED and we resume, and an abandoned  */
+/* upload (no STOPPED event) is caught by a no-activity watchdog that resumes   */
+/* ZBOSS so Zigbee keeps running. DFU_STARTED fires on the first chunk (off == 0), so all */
 /* subsequent chunks ride a quiet radio. Gated on the debug-functions +        */
 /* notification-hook Kconfigs (see prj.conf).                                  */
 /* ------------------------------------------------------------------------- */
 #ifdef FLEXIT_DFU_RADIO_YIELD
+/* DFU_STOPPED only fires on errors MCUmgr itself detects. An upload that is
+ * simply abandoned (BLE link dropped, client killed) or that completes without
+ * the follow-up reset produces no further event, which would leave ZBOSS
+ * suspended until the next reboot — Zigbee silently dead, HA sensors frozen and
+ * fan/setpoint control lost. So every upload event re-arms this watchdog, and if
+ * no upload activity is seen for FLEXIT_DFU_ZBOSS_RESUME_S, ZBOSS is resumed.
+ * After the last chunk (DFU_PENDING) the client normally test-marks and resets
+ * within seconds; if that reset never comes, the same timeout brings Zigbee back.
+ */
+#define FLEXIT_DFU_ZBOSS_RESUME_S 30
+
+static atomic_t zboss_dfu_suspended = ATOMIC_INIT(0);
+
+static void zboss_dfu_resume(const char *why)
+{
+	if (atomic_cas(&zboss_dfu_suspended, 1, 0)) {
+		LOG_WRN("%s — resuming ZBOSS", why);
+		zigbee_debug_resume_zboss_thread();
+	}
+}
+
+static void dfu_resume_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	zboss_dfu_resume("No DFU upload activity for " STRINGIFY(FLEXIT_DFU_ZBOSS_RESUME_S) " s");
+}
+static K_WORK_DELAYABLE_DEFINE(dfu_resume_work, dfu_resume_work_fn);
+
 static enum mgmt_cb_return dfu_radio_yield_cb(uint32_t event,
 		enum mgmt_cb_return prev_status, int32_t *rc, uint16_t *group,
 		bool *abort_more, void *data, size_t data_size)
@@ -1061,16 +1090,26 @@ static enum mgmt_cb_return dfu_radio_yield_cb(uint32_t event,
 	ARG_UNUSED(data);
 	ARG_UNUSED(data_size);
 
-	if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STARTED) {
-		if (zigbee_debug_zboss_thread_is_created()) {
+	switch (event) {
+	case MGMT_EVT_OP_IMG_MGMT_DFU_STARTED:
+		if (zigbee_debug_zboss_thread_is_created() &&
+		    atomic_cas(&zboss_dfu_suspended, 0, 1)) {
 			LOG_WRN("DFU upload started — suspending ZBOSS to free the radio for BLE");
 			zigbee_debug_suspend_zboss_thread();
 		}
-	} else if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED) {
-		if (zigbee_debug_zboss_thread_is_created()) {
-			LOG_WRN("DFU upload stopped — resuming ZBOSS");
-			zigbee_debug_resume_zboss_thread();
-		}
+		k_work_reschedule(&dfu_resume_work, K_SECONDS(FLEXIT_DFU_ZBOSS_RESUME_S));
+		break;
+	case MGMT_EVT_OP_IMG_MGMT_DFU_CHUNK_WRITE_COMPLETE:
+	case MGMT_EVT_OP_IMG_MGMT_DFU_PENDING:
+		/* Upload still progressing (or just finished, reset expected soon). */
+		k_work_reschedule(&dfu_resume_work, K_SECONDS(FLEXIT_DFU_ZBOSS_RESUME_S));
+		break;
+	case MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED:
+		k_work_cancel_delayable(&dfu_resume_work);
+		zboss_dfu_resume("DFU upload stopped");
+		break;
+	default:
+		break;
 	}
 
 	return MGMT_CB_OK;
@@ -1079,6 +1118,8 @@ static enum mgmt_cb_return dfu_radio_yield_cb(uint32_t event,
 static struct mgmt_callback dfu_radio_yield_cb_entry = {
 	.callback = dfu_radio_yield_cb,
 	.event_id = MGMT_EVT_OP_IMG_MGMT_DFU_STARTED |
+		    MGMT_EVT_OP_IMG_MGMT_DFU_CHUNK_WRITE_COMPLETE |
+		    MGMT_EVT_OP_IMG_MGMT_DFU_PENDING |
 		    MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED,
 };
 #endif /* FLEXIT_DFU_RADIO_YIELD */

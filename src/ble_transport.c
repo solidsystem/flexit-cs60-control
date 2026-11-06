@@ -87,9 +87,22 @@ static const struct bt_data sd[] = {
     BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_VAL),
 };
 
+/* Connectable advertising at the GAP "slow" interval (1.0-1.2 s) instead of
+ * fast (30-60 ms). The device advertises whenever no central is connected —
+ * i.e. nearly all the time — and every advertising event takes the shared
+ * 2.4 GHz radio away from the 802.15.4 side via MPSL. At the fast rate that is
+ * ~20-30 events/s, which can make the Zigbee router miss incoming frames
+ * (coordinator sees MAC_NO_ACK / failed FanMode or setpoint writes). BLE is
+ * only used for occasional maintenance, so ~1 s extra discovery latency for
+ * ble-client is an acceptable trade.
+ */
+#define ADV_CONN_SLOW \
+    BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN, BT_GAP_ADV_SLOW_INT_MIN, \
+                    BT_GAP_ADV_SLOW_INT_MAX, NULL)
+
 static void advertising_start(void)
 {
-    int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
+    int err = bt_le_adv_start(ADV_CONN_SLOW, ad, ARRAY_SIZE(ad),
                               sd, ARRAY_SIZE(sd));
     if (err == 0) {
         printk("BLE advertising (re)started\n");
