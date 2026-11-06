@@ -55,14 +55,22 @@ static void bridge_work_fn(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
+	/* fc10_frames value at the last push; the mirror starts at 0. */
+	static uint32_t pushed_fc10_frames;
+
 	struct panel_mirror_state st;
 	panel_mirror_snapshot(&st);
 
-	/* Nothing decoded yet (mirror still zero-initialised) — don't push a
-	 * spurious 0.00 C / Stop; leave the channels at "unknown" until the
-	 * first FC10 broadcast lands.
+	/* Only push when a new FC10 broadcast has been decoded since the last
+	 * push. This also covers "nothing decoded yet" (mirror still
+	 * zero-initialised, so no spurious 0.00 C / Stop). Re-pushing an old
+	 * snapshot would refresh zigbee_ep's per-channel freshness timestamp and
+	 * defeat its stale guard (FLEXIT_TEMP_STALE_MS): with the RS485 link
+	 * down, HA would show the last temperature forever instead of "unknown".
 	 */
-	if (st.fc10_frames > 0) {
+	if (st.fc10_frames != pushed_fc10_frames) {
+		pushed_fc10_frames = st.fc10_frames;
+
 		/* Panel temps are int16 ×10 °C; ZCL MeasuredValue is ×100
 		 * (centi-°C). Range -40..80 °C keeps ×100 inside int16.
 		 */
