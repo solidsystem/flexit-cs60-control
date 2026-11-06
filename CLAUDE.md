@@ -51,6 +51,13 @@ inherits the environment:
 export FLEXIT_CS60_CONTROL_BLE_KEY=444999
 ```
 
+**444999 is only an example.** The deployed device was built with a different,
+secret passkey that is deliberately not in the repo. Build with the *same* key
+the device already uses (ask the user if it is not in the environment) — an
+image built with another key breaks fresh pairing after it is flashed (existing
+bonds still work, which hides the mistake). Building with a new key changes the
+passkey for every future pairing.
+
 ## Common Commands
 
 ```bash
@@ -98,7 +105,8 @@ a bricked board" below). Avoid them:
 
 ## Flashing
 
-**Normal workflow: BLE DFU** — see the `BLE client` section below.
+**Normal workflow: BLE DFU from the Raspberry Pi** — see "BLE DFU workflow (via
+the Raspberry Pi)" below.
 
 ### USB DFU via mcu-manager
 
@@ -130,8 +138,9 @@ flash/CBOR/CRC deps) so the *next* update has an SMP server to talk to.
 A Go CLI tool that connects to the xiao_ble over BLE. It is cross-platform; the
 pairing layer differs per OS (see `pairing_linux.go` / `pairing_other.go`):
 
-- **Linux (BlueZ):** uses an nrf52840dk running `hci_usb` as the HCI adapter
-  (appears as `hci0` in BlueZ). Pairing is handled automatically using the
+- **Linux (BlueZ):** uses BlueZ's default adapter (`hci0`): on the dev machine
+  an nrf52840dk running `hci_usb`, on the Raspberry Pi flashing host (see "BLE
+  DFU workflow") the Pi's built-in radio. Pairing is handled automatically using the
   passkey from the `FLEXIT_CS60_CONTROL_BLE_KEY` environment variable (a 6-digit
   number) — the same variable the firmware bakes in at build time. Every
   connecting subcommand exits with an error if it is unset (`scan` does not
@@ -183,7 +192,9 @@ export FLEXIT_CS60_CONTROL_BLE_KEY=444999
 # Flash firmware over BLE via SMP (upload → test-mark → reset)
 ./ble-client flash build/flexit-cs60-control/zephyr/zephyr.signed.bin
 
-# Confirm after reboot (run within ~60s of flash completing)
+# Confirm after the test boot is verified healthy. Refuses unless <hash-hex>
+# is the active image in slot 0. There is no timeout: an unconfirmed image
+# keeps running until the next reset, which reverts to the previous image.
 ./ble-client confirm <hash-hex>
 
 # List firmware images in slot 0 and slot 1
@@ -196,21 +207,55 @@ export FLEXIT_CS60_CONTROL_BLE_KEY=444999
 `stream` sends a `"stop"` command before disconnecting so the firmware cleanly
 disables forwarding.
 
-### BLE DFU workflow
+### BLE DFU workflow (via the Raspberry Pi)
+
+BLE flashing is done from a Raspberry Pi Zero next to the XIAO, reachable over
+SSH (arm64 Raspberry Pi OS). Its hostname is deliberately not in the repo: take
+it from memory outside the repo, or ask the user — written as `$PI_HOST` below.
+It runs `ble-client` with its built-in Bluetooth radio and is already bonded
+with the device. Build on the dev machine, copy the binary and image over, and run
+`ble-client` on the Pi. Use `ssh -o BatchMode=yes` so a missing key fails
+instead of hanging on a prompt.
 
 ```bash
-# 1. Build
+# 1. Build on the dev machine (FLEXIT_CS60_CONTROL_BLE_KEY = the device's key,
+#    see "Environment"; use --pristine if the key changed since the last build,
+#    since it is only picked up when CMake configures)
 source ~/ncs/v3.4.0/zephyr/zephyr-env.sh
 nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 -- \
     west build -b xiao_ble/nrf52840 --sysbuild --build-dir build
 
-# 2. Flash over BLE (prints the hash and the confirm command to run next)
-cd tools/ble-client
-./ble-client flash ../../build/flexit-cs60-control/zephyr/zephyr.signed.bin
+# 2. Cross-compile ble-client for the Pi (only when tools/ble-client changed)
+(cd tools/ble-client && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/ble-client-arm64 .)
+scp /tmp/ble-client-arm64 $PI_HOST:ble-client
 
-# 3. Confirm after device reboots (~10s)
-./ble-client confirm <hash printed by flash>
+# 3. Copy the signed image to the Pi
+scp build/flexit-cs60-control/zephyr/zephyr.signed.bin $PI_HOST:
+
+# 4. Flash as a TEST BOOT (upload -> test-mark -> reset; never confirms).
+#    Prints the slot-1 hash.
+ssh $PI_HOST \
+    "FLEXIT_CS60_CONTROL_BLE_KEY=$FLEXIT_CS60_CONTROL_BLE_KEY ./ble-client flash zephyr.signed.bin"
+
+# 5. Verify the test boot. MCUboot swaps from external flash first; the scan
+#    just waits until the device advertises again.
+#    - list:    slot 0 = new hash, active, confirmed:false
+#    - state:   FC10 frames counting, CRCERR ~0, SLV_FC01 > 0 (CS60 polls us)
+#    - zbstate: JOINED
+ssh $PI_HOST "export FLEXIT_CS60_CONTROL_BLE_KEY=$FLEXIT_CS60_CONTROL_BLE_KEY; \
+    ./ble-client list; ./ble-client state; ./ble-client zbstate"
+
+# 6. Have the user check Home Assistant, then — only with their go-ahead —
+#    confirm (refuses unless the hash is the active slot-0 image):
+ssh $PI_HOST \
+    "FLEXIT_CS60_CONTROL_BLE_KEY=$FLEXIT_CS60_CONTROL_BLE_KEY ./ble-client confirm <hash printed by flash>"
 ```
+
+If the test image misbehaves, do not confirm: `./ble-client reboot` (or a power
+cycle) makes MCUboot revert to the previous confirmed image.
+
+Running `ble-client` directly on the dev machine (nrf52840dk HCI adapter) works
+the same way, without the ssh/scp steps.
 
 The firmware must keep `CONFIG_MCUMGR_TRANSPORT_BT=y` and
 `CONFIG_MCUMGR_TRANSPORT_BT_PERM_RW_AUTHEN=y` so the BLE SMP server is active.
